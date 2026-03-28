@@ -1,0 +1,23 @@
+# Generated outputs (large, user-specific)
+Non_Committal/
+Color_by_CSVs/
+Archive/
+
+# Generated HTMLs and synapse caches within Examples (too large to commit)
+Examples/**/*.html
+Examples/**/*_synapses.json
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Original Chucky (only gold-cropped version needed)
+Chucky.png
+
+# Developer utilities (not needed by users)
+patch_htmls.py
