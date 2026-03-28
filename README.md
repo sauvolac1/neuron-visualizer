@@ -8,8 +8,8 @@ Interactive Three.js visualizations of neuron morphologies from the [neuPrint](h
 
 Download a pre-built example and open it in your browser:
 
-- **EPG** — 50 neurons, 2 types (ellipsoid body compass neurons) — [view in browser](https://epgviz.netlify.app/) | [download](https://drive.google.com/file/d/1MpyMU-bE7-B6wzMu7Oewg9p3Y9eFSb87/view?usp=drive_link) | [notebook](Examples/EPG/)
-- **FB** — 601 neurons, 166 types (fan-shaped body) with custom color modes — [view in browser](https://fbtviz.netlify.app/) | [download](https://drive.google.com/file/d/1JEHjA27eSceIz5E_SPy_g1vUlZLB5H4A/view?usp=drive_link) | [notebook](Examples/FB/)
+- **EPG** — 50 neurons, 2 types (ellipsoid body compass neurons) — [download](https://drive.google.com/file/d/1MpyMU-bE7-B6wzMu7Oewg9p3Y9eFSb87/view?usp=drive_link) | [notebook](Examples/EPG/)
+- **FB** — 601 neurons, 166 types (fan-shaped body) with custom color modes — [download](https://drive.google.com/file/d/1JEHjA27eSceIz5E_SPy_g1vUlZLB5H4A/view?usp=drive_link) | [notebook](Examples/FB/)
 
 > These are self-contained HTML files. Just download and double-click — no Python, no server, no dependencies.
 
