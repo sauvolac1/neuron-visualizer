@@ -1,17 +1,15 @@
 # 3D Neuron Visualizer
 
-Interactive Three.js visualizations of neuron morphologies from the [neuPrint](https://neuprint.janelia.org/) connectomics database.
+Interactive 3D visualizations of neuron morphologies and synaptic connectivity from [neuPrint](https://neuprint.janelia.org/).
 
-**New to Python?** See [README_IF_YOURE_LOST.md](README_IF_YOURE_LOST.md) for step-by-step setup instructions.
+If you're new to Python, see [README_IF_YOURE_LOST.md](README_IF_YOURE_LOST.md) for setup help.
 
-### Try it now — no setup needed
+### Examples
 
-Download a pre-built example and open it in your browser:
+Pre-built visualizations (self-contained HTML files — download and open in Chrome):
 
-- **EPG** — 50 neurons, 2 types (ellipsoid body compass neurons) — [download](https://drive.google.com/file/d/1MpyMU-bE7-B6wzMu7Oewg9p3Y9eFSb87/view?usp=drive_link) | [notebook](Examples/EPG/)
-- **FB** — 601 neurons, 166 types (fan-shaped body) with custom color modes — [download](https://drive.google.com/file/d/1JEHjA27eSceIz5E_SPy_g1vUlZLB5H4A/view?usp=drive_link) | [notebook](Examples/FB/)
-
-> These are self-contained HTML files. Just download and double-click — no Python, no server, no dependencies.
+- **EPG** — 50 neurons, 2 types — [download](https://drive.google.com/file/d/1MpyMU-bE7-B6wzMu7Oewg9p3Y9eFSb87/view?usp=drive_link) | [notebook](Examples/EPG/)
+- **FB** — 601 neurons, 166 types, custom color modes — [download](https://drive.google.com/file/d/1JEHjA27eSceIz5E_SPy_g1vUlZLB5H4A/view?usp=drive_link) | [notebook](Examples/FB/)
 
 ## Quick Start
 
