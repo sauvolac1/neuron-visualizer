@@ -233,6 +233,12 @@ def fetch_neuron_meshes(body_ids, max_faces=5000, max_threads=10):
     t1 = time.time()
     result = {}
 
+    def _pool_init(script_dir):
+        """Initializer for spawned worker processes — ensures they can find our module."""
+        import sys
+        if script_dir not in sys.path:
+            sys.path.insert(0, script_dir)
+
     if n_workers <= 1 or len(mesh_args) <= 2:
         # Sequential fallback (single core, or very few meshes)
         for bid, v, f, mf in tqdm(mesh_args, desc='Decimating', unit='mesh'):
@@ -244,7 +250,11 @@ def fetch_neuron_meshes(body_ids, max_faces=5000, max_threads=10):
         # 'spawn' works on all platforms (macOS, Linux, Windows).
         try:
             ctx = multiprocessing.get_context('spawn')
-            with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+            script_dir = str(Path(__file__).resolve().parent)
+            with ProcessPoolExecutor(
+                max_workers=n_workers, mp_context=ctx,
+                initializer=_pool_init, initargs=(script_dir,)
+            ) as pool:
                 futures = {pool.submit(_decimate_mesh, v, f, mf): bid
                            for bid, v, f, mf in mesh_args}
                 with tqdm(total=len(futures), desc=f'Decimating ({n_workers} cores)',
