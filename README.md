@@ -11,6 +11,8 @@ New to Python? See [README_IF_YOURE_LOST.md](README_IF_YOURE_LOST.md).
 
 ## Setup
 
+Requires **Python 3.9+**.
+
 ```bash
 git clone https://github.com/sauvolac1/neuron-visualizer.git
 cd neuron-visualizer
@@ -26,8 +28,8 @@ Get a neuPrint token: https://neuprint-cns.janelia.org/ → Account → Auth Tok
 **Command line**:
 ```bash
 export NEUPRINT_TOKEN='your_token'
-python generate_visualization.py EPG
-python generate_visualization.py FB --use-meshes --mesh-faces auto
+python Core_Code/generate_visualization.py EPG
+python Core_Code/generate_visualization.py FB --use-meshes --mesh-faces auto
 ```
 
 Output is a standalone HTML — open it directly in Chrome.

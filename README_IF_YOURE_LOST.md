@@ -41,7 +41,7 @@ An "environment" is an isolated workspace so this project's libraries don't inte
 Open Terminal (Mac) or Anaconda Prompt (Windows) and run these commands one at a time:
 
 ```bash
-conda create -n neuron_visualizer python=3.11
+conda create -n neuron_visualizer python=3.9
 ```
 
 It will ask you to confirm — type `y` and press Enter.
@@ -129,7 +129,7 @@ You'll paste this into the notebook in the next step.
 export NEUPRINT_TOKEN='paste_your_token_here'    # Mac
 set NEUPRINT_TOKEN=paste_your_token_here          # Windows
 
-python generate_visualization.py EPG --use-meshes
+python Core_Code/generate_visualization.py EPG --use-meshes
 ```
 
 ---
