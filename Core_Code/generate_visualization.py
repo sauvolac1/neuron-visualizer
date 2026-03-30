@@ -168,6 +168,13 @@ def fetch_neuron_data(pattern):
     return all_neurons_df, roi_counts_df, neurons_full, type_lookup, nt_lookup
 
 
+def _pool_init(script_dir):
+    """Initializer for spawned worker processes — ensures they can find our module."""
+    import sys
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+
+
 def _decimate_mesh(verts, faces, max_faces=5000):
     """Decimate a mesh using Open3D quadric edge collapse.
 
@@ -232,12 +239,6 @@ def fetch_neuron_meshes(body_ids, max_faces=5000, max_threads=10):
     print(f'  Decimating {len(mesh_args)} meshes ({n_workers} workers)...')
     t1 = time.time()
     result = {}
-
-    def _pool_init(script_dir):
-        """Initializer for spawned worker processes — ensures they can find our module."""
-        import sys
-        if script_dir not in sys.path:
-            sys.path.insert(0, script_dir)
 
     if n_workers <= 1 or len(mesh_args) <= 2:
         # Sequential fallback (single core, or very few meshes)
