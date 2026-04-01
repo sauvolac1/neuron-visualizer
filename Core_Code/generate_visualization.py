@@ -51,12 +51,25 @@ LINEWIDTH = 1
 ROI_COLOR = (0.85, 0.85, 0.85)
 ROI_MESH_OPACITY = 0.08
 
-CAMERA = dict(
-    eye=dict(x=0.001461, y=-0.035330, z=-0.599250),
-    center=dict(x=0.001669, y=-0.030622, z=0.000030),
-    up=dict(x=0, y=0, z=1),
-    projection=dict(type='perspective')
-)
+def _compute_default_camera(norm_params):
+    """Compute a default camera looking at the center of the data from the -Z direction.
+
+    After normalization, the data center is at ~(0, 0, 0) and the extent is ~1.0.
+    We place the camera back along -Z at ~0.6 to frame the data, looking at center.
+    """
+    # In normalized coords, data is roughly centered at origin with max extent ~1
+    # The center of mass may have a slight offset from origin due to asymmetry
+    cx = cy = cz = 0.0
+    if norm_params and 'aspect' in norm_params:
+        # Small vertical offset to center the data visually
+        a = norm_params['aspect']
+        cy = -(a.get('y', 1.0) - 1.0) * 0.02  # nudge up slightly if aspect < 1
+    return dict(
+        eye=dict(x=0.0, y=cy, z=-0.6),
+        center=dict(x=0.0, y=cy, z=0.0),
+        up=dict(x=0, y=-1, z=0),  # Dorsal-up (-Y)
+        projection=dict(type='perspective')
+    )
 
 NT_COLORS = {
     'acetylcholine': 'rgb(255,255,255)',
@@ -673,9 +686,75 @@ def _build_synapse_data(syn_df, bid_type_map, norm_params):
     }
 
 
+def _process_synapse_csvs(synapse_csvs):
+    """Read synapse CSVs and return embedded group definitions for the JS viewer.
+
+    Each CSV must have columns: bodyid_pre, bodyid_post, and at least one
+    value column (category names or direct CSS color strings).
+
+    Returns list of dicts: {pairs: ["pre|post", ...], color: str, label: str}
+    """
+    import colorsys
+    groups = []
+    for csv_path in (synapse_csvs or []):
+        csv_path = Path(csv_path)
+        if not csv_path.exists():
+            print(f"  Warning: synapse CSV not found: {csv_path}")
+            continue
+        df = pd.read_csv(csv_path)
+        cols_lower = {c.lower(): c for c in df.columns}
+        pre_col = cols_lower.get('bodyid_pre') or cols_lower.get('body_id_pre')
+        post_col = cols_lower.get('bodyid_post') or cols_lower.get('body_id_post')
+        if not pre_col or not post_col:
+            print(f"  Warning: {csv_path.name} missing bodyid_pre/bodyid_post columns, skipping")
+            continue
+        val_cols = [c for c in df.columns if c not in (pre_col, post_col)]
+        if not val_cols:
+            print(f"  Warning: {csv_path.name} has no value column, skipping")
+            continue
+        val_col = val_cols[0]
+        # Group rows by value
+        grouped = df.groupby(val_col)
+        unique_vals = sorted(df[val_col].dropna().unique(), key=str)
+        n_vals = len(unique_vals)
+        # Auto-assign HSL colors (evenly spaced hues)
+        auto_colors = {}
+        for i, v in enumerate(unique_vals):
+            h = i / max(n_vals, 1)
+            r, g, b = colorsys.hls_to_rgb(h, 0.55, 0.75)
+            auto_colors[str(v)] = f'rgb({int(r*255)},{int(g*255)},{int(b*255)})'
+        for val, sub_df in grouped:
+            pairs = []
+            for _, row in sub_df.iterrows():
+                pre = str(int(row[pre_col]))
+                post = str(int(row[post_col]))
+                pairs.append(f'{pre}|{post}')
+            if pairs:
+                groups.append({
+                    'pairs': pairs,
+                    'color': auto_colors.get(str(val), 'rgb(200,200,200)'),
+                    'label': f'CSV: {val}',
+                })
+        print(f"  Embedded {len(grouped)} synapse groups from {csv_path.name}")
+    return groups
+
+
 # ============================================================
 # Color Modes
 # ============================================================
+
+def _detect_csv_key_col(df, csv_path):
+    """Detect the key column in a color CSV: 'type' or 'bodyid'/'body_id'."""
+    cols_lower = {c.lower(): c for c in df.columns}
+    if 'type' in cols_lower:
+        return cols_lower['type']
+    if 'bodyid' in cols_lower:
+        return cols_lower['bodyid']
+    if 'body_id' in cols_lower:
+        return cols_lower['body_id']
+    print(f"  Warning: no 'type' or 'bodyid' column in {Path(csv_path).name}, skipping")
+    return None
+
 
 def load_score_modes(continuous_csvs=None, categorical_csvs=None,
                      score_csv=None, modality_csv=None):
@@ -716,10 +795,12 @@ def load_score_modes(continuous_csvs=None, categorical_csvs=None,
             print(f"  Warning: continuous CSV not found: {csv_path}")
             continue
         df = pd.read_csv(csv_path)
-        if 'type' not in df.columns:
-            print(f"  Warning: no 'type' column in {csv_path.name}, skipping")
+        # Detect key column: type (type-level) or bodyid (instance-level)
+        key_col = _detect_csv_key_col(df, csv_path)
+        if key_col is None:
             continue
-        value_cols = [c for c in df.columns if c != 'type']
+        is_instance = key_col != 'type'
+        value_cols = [c for c in df.columns if c != key_col]
         for col in value_cols:
             vals = pd.to_numeric(df[col], errors='coerce').dropna()
             if len(vals) == 0:
@@ -732,9 +813,10 @@ def load_score_modes(continuous_csvs=None, categorical_csvs=None,
                 seq_idx += 1
             mode_name = col.replace('_', ' ').title()
             score_modes[mode_name] = {
-                'scores': dict(zip(df['type'], df[col])),
+                'scores': dict(zip(df[key_col].astype(str), df[col])),
                 'cmap': cmap,
                 'label': mode_name,
+                'is_instance_level': is_instance,
             }
 
     # --- Categorical modes ---
@@ -745,16 +827,18 @@ def load_score_modes(continuous_csvs=None, categorical_csvs=None,
             print(f"  Warning: categorical CSV not found: {csv_path}")
             continue
         df = pd.read_csv(csv_path)
-        if 'type' not in df.columns:
-            print(f"  Warning: no 'type' column in {csv_path.name}, skipping")
+        key_col = _detect_csv_key_col(df, csv_path)
+        if key_col is None:
             continue
-        cat_cols = [c for c in df.columns if c != 'type']
+        is_instance = key_col != 'type'
+        cat_cols = [c for c in df.columns if c != key_col]
         for col in cat_cols:
             mode_name = col.replace('_', ' ').title()
             cat_modes[mode_name] = {
-                'categories': dict(zip(df['type'].astype(str), df[col].astype(str))),
+                'categories': dict(zip(df[key_col].astype(str), df[col].astype(str))),
                 'label': mode_name,
                 'is_categorical': True,
+                'is_instance_level': is_instance,
             }
 
     return score_modes, cat_modes
@@ -800,11 +884,16 @@ def build_color_modes(all_types, neurons_full, type_lookup, score_modes,
     })
 
     # 3. User-defined categorical modes
+    bid_str_set = {str(n.id) for n in neurons_full}
     if cat_modes:
         for mode_name, mode_cfg in cat_modes.items():
-            categories = mode_cfg['categories']  # {type_name: category_value}
-            type_set = set(all_types)
-            matched = {t: c for t, c in categories.items() if t in type_set}
+            categories = mode_cfg['categories']  # {key: category_value}
+            is_instance = mode_cfg.get('is_instance_level', False)
+            if is_instance:
+                matched = {k: c for k, c in categories.items() if k in bid_str_set}
+            else:
+                type_set = set(all_types)
+                matched = {t: c for t, c in categories.items() if t in type_set}
             if not matched:
                 continue
             # Assign colors to unique category values
@@ -818,23 +907,40 @@ def build_color_modes(all_types, neurons_full, type_lookup, score_modes,
                              for i, c in enumerate(unique_cats)}
             cd = {}
             for neuron in neurons_full:
-                ntype = type_lookup.get(neuron.id)
-                cat_val = matched.get(ntype)
+                bid = str(neuron.id)
+                if is_instance:
+                    cat_val = matched.get(bid)
+                else:
+                    ntype = type_lookup.get(neuron.id)
+                    cat_val = matched.get(ntype)
                 if cat_val and cat_val in cat_color_map:
                     cd[neuron.id] = cat_color_map[cat_val]
                 else:
-                    cd[neuron.id] = (0.5, 0.5, 0.5, 1.0)
-            color_modes.append({
+                    cd[neuron.id] = (0.5, 0.5, 0.5, 0.3) if is_instance else (0.5, 0.5, 0.5, 1.0)
+            mode_entry = {
                 'name': mode_name, 'color_dict': cd,
                 'is_scalar': False, 'cmap_obj': None, 'norm': None,
                 'label': mode_cfg.get('label', mode_name)
-            })
+            }
+            if is_instance:
+                mode_entry['is_instance_level'] = True
+            color_modes.append(mode_entry)
 
     # 4. Score-based (continuous) modes
     for mode_name, mode_cfg in score_modes.items():
         scores = mode_cfg['scores']
-        type_set = set(all_types)
-        matched = {t: s for t, s in scores.items() if t in type_set}
+        is_instance = mode_cfg.get('is_instance_level', False)
+        if is_instance:
+            matched = {}
+            for k, s in scores.items():
+                if k in bid_str_set:
+                    try:
+                        matched[k] = float(s)
+                    except (ValueError, TypeError):
+                        pass
+        else:
+            type_set = set(all_types)
+            matched = {t: s for t, s in scores.items() if t in type_set}
         if not matched:
             continue
         cmap_name = mode_cfg.get('cmap', default_cmap)
@@ -847,15 +953,27 @@ def build_color_modes(all_types, neurons_full, type_lookup, score_modes,
             norm = Normalize(vmin=vals.min(), vmax=vals.max())
         cd = {}
         for neuron in neurons_full:
-            ntype = type_lookup.get(neuron.id)
-            score = matched.get(ntype, 0) if ntype else 0
-            rgba = cmap_obj(norm(score))
-            cd[neuron.id] = (*rgba[:3], 1.0)
-        color_modes.append({
+            bid = str(neuron.id)
+            if is_instance:
+                score = matched.get(bid)
+                if score is not None:
+                    rgba = cmap_obj(norm(score))
+                    cd[neuron.id] = (*rgba[:3], 1.0)
+                else:
+                    cd[neuron.id] = (0.5, 0.5, 0.5, 0.3)
+            else:
+                ntype = type_lookup.get(neuron.id)
+                score = matched.get(ntype, 0) if ntype else 0
+                rgba = cmap_obj(norm(score))
+                cd[neuron.id] = (*rgba[:3], 1.0)
+        mode_entry = {
             'name': mode_name, 'color_dict': cd, 'is_scalar': True,
             'cmap_obj': cmap_obj, 'norm': norm,
             'label': mode_cfg.get('label', mode_name)
-        })
+        }
+        if is_instance:
+            mode_entry['is_instance_level'] = True
+        color_modes.append(mode_entry)
 
     print(f'{len(color_modes)} color mode(s): {[m["name"] for m in color_modes]}')
     return color_modes
@@ -877,6 +995,8 @@ def serialize_color_modes(color_modes, all_types, type_lookup, nt_lookup, bid_ty
                 tc[t] = f'rgb({int(rgba[0]*255)},{int(rgba[1]*255)},{int(rgba[2]*255)})'
         entry = {'name': mode['name'], 'colors': bid_colors, 'type_colors': tc,
                  'is_scalar': mode['is_scalar']}
+        if mode.get('is_instance_level'):
+            entry['is_instance_level'] = True
         if mode['is_scalar']:
             entry['cmin'] = float(mode['norm'].vmin)
             entry['cmax'] = float(mode['norm'].vmax)
@@ -891,7 +1011,7 @@ def serialize_color_modes(color_modes, all_types, type_lookup, nt_lookup, bid_ty
     # Auto-inject "Predicted NT" color mode
     nt_mode = _build_nt_color_mode(nt_lookup, bid_type_map)
     if nt_mode:
-        js_modes.insert(1, nt_mode)
+        js_modes.insert(2, nt_mode)
         print(f"  Added 'Predicted NT' color mode ({len(nt_lookup)} neurons)")
 
     return js_modes
@@ -1153,31 +1273,29 @@ def _decimate_anchor(verts, faces, max_faces):
     return verts, faces
 
 
-# Pre-computed brain bounding box from all BRAIN_NEUROPILS in hemibrain/CNS.
-# This never changes between runs — no need to re-fetch 50+ ROI meshes each time.
-# Computed once via: fetching all BRAIN_NEUROPILS vertices and taking min/max.
-_BRAIN_BBOX = {
+# Pre-computed brain bounding box for CNS dataset (fallback if no ROI data available).
+_CNS_BRAIN_BBOX = {
     'xmin': 5798, 'xmax': 90473,
     'ymin': 4856, 'ymax': 51895,
     'zmin': 10168, 'zmax': 42568,
 }
 
 
-def build_anchor_bbox(roi_volumes):
+def build_anchor_bbox(roi_volumes, neurons_full=None, dataset='cns'):
     """Compute brain bounding box for normalization.
 
-    Uses pre-computed brain bounds (constant across all datasets), but
-    also includes any ROI vertices in case they extend beyond the known range.
+    Computes bounds from actual ROI mesh vertices and neuron skeleton coordinates.
+    Falls back to pre-computed CNS bounds only if dataset is 'cns' and no ROI data.
 
     Returns:
         norm_params: dict with cx, cy, cz, dmax, aspect
     """
-    xmin, xmax = _BRAIN_BBOX['xmin'], _BRAIN_BBOX['xmax']
-    ymin, ymax = _BRAIN_BBOX['ymin'], _BRAIN_BBOX['ymax']
-    zmin, zmax = _BRAIN_BBOX['zmin'], _BRAIN_BBOX['zmax']
+    # Start from actual data bounds (ROI meshes + neuron skeletons)
+    xmin = ymin = zmin = float('inf')
+    xmax = ymax = zmax = float('-inf')
 
-    # Extend with any ROI vertices that might fall outside the known range
-    for name, vol in roi_volumes.items():
+    # Include all ROI vertices
+    for name, vol in (roi_volumes or {}).items():
         v = vol.vertices
         xmin = min(xmin, v[:, 0].min())
         xmax = max(xmax, v[:, 0].max())
@@ -1185,6 +1303,30 @@ def build_anchor_bbox(roi_volumes):
         ymax = max(ymax, v[:, 1].max())
         zmin = min(zmin, v[:, 2].min())
         zmax = max(zmax, v[:, 2].max())
+
+    # Include neuron skeleton bounds if available
+    if neurons_full:
+        for n in neurons_full:
+            if hasattr(n, 'nodes') and len(n.nodes) > 0:
+                coords = n.nodes[['x', 'y', 'z']].values
+                xmin = min(xmin, coords[:, 0].min())
+                xmax = max(xmax, coords[:, 0].max())
+                ymin = min(ymin, coords[:, 1].min())
+                ymax = max(ymax, coords[:, 1].max())
+                zmin = min(zmin, coords[:, 2].min())
+                zmax = max(zmax, coords[:, 2].max())
+
+    # If no data found, fall back to CNS hardcoded bbox or zero-centered unit
+    if xmin == float('inf'):
+        if dataset and dataset.lower() == 'cns':
+            xmin, xmax = _CNS_BRAIN_BBOX['xmin'], _CNS_BRAIN_BBOX['xmax']
+            ymin, ymax = _CNS_BRAIN_BBOX['ymin'], _CNS_BRAIN_BBOX['ymax']
+            zmin, zmax = _CNS_BRAIN_BBOX['zmin'], _CNS_BRAIN_BBOX['zmax']
+            print("  Using pre-computed CNS brain bounding box")
+        else:
+            xmin = ymin = zmin = -1
+            xmax = ymax = zmax = 1
+            print("  Warning: no ROI or neuron data for bounding box, using unit cube")
 
     cx = (xmin + xmax) / 2
     cy = (ymin + ymax) / 2
@@ -1214,7 +1356,7 @@ def build_data_bundle(
     instance_lookup, type_upstream, type_downstream,
     neuron_upstream, neuron_downstream,
     norm_params, regex_term='', neuron_meshes=None,
-    _data_source=None,
+    _data_source=None, voxel_size_nm=8,
 ):
     """Build the Three.js data bundle directly from navis objects."""
 
@@ -1336,7 +1478,7 @@ def build_data_bundle(
         'roiMeshes': roi_meshes,
         'roiBounds': roi_bounds,
         'normParams': norm_params,
-        'camera': CAMERA,
+        'camera': _compute_default_camera(norm_params),
         'allTypes': all_types,
         'typeNeurons': type_neurons,
         'bidTypeMap': bid_type_map,
@@ -1355,7 +1497,12 @@ def build_data_bundle(
         'initialLineWidth': LINEWIDTH,
         'regexTerm': regex_term,
         'dataSource': _data_source,
-        'voxelSizeNm': 8,  # neuPrint CNS uses 8nm voxels
+        'voxelSizeNm': voxel_size_nm,
+        'axisLabels': {
+            'xPos': 'Left', 'xNeg': 'Right',
+            'yPos': 'Ventral', 'yNeg': 'Dorsal',
+            'zNeg': 'Anterior', 'zPos': 'Posterior',
+        },
     }
 
     # Neuron meshes (optional)
@@ -1622,6 +1769,7 @@ const DATA = {data_json};
 # ============================================================
 
 def generate_visualization(pattern, continuous_csvs=None, categorical_csvs=None,
+                           synapse_csvs=None,
                            output_dir=None, auto_open=False,
                            skip_synapses=False, synapse_limit=None,
                            use_meshes=False, mesh_faces='auto', max_file_mb=500,
@@ -1685,7 +1833,7 @@ def generate_visualization(pattern, continuous_csvs=None, categorical_csvs=None,
 
     # 6. Compute brain bounding box
     print("Computing brain bounding box...")
-    norm_params = build_anchor_bbox(roi_volumes)
+    norm_params = build_anchor_bbox(roi_volumes, neurons_full=neurons_full, dataset=dataset)
 
     # 7. Serialize color modes for JS
     bid_type_map = {str(bid): typ for bid, typ in type_lookup.items()}
@@ -1728,7 +1876,22 @@ def generate_visualization(pattern, continuous_csvs=None, categorical_csvs=None,
             print(f'  Warning: mesh fetching failed ({e}). Continuing without meshes.')
             neuron_meshes = None
 
-    # 8. Build Three.js data bundle
+    # 8. Fetch dataset metadata for voxel size
+    voxel_size_nm = 8  # fallback
+    try:
+        import neuprint as _neu
+        meta = _neu.fetch_meta()
+        vs = meta.get('voxelSize')
+        if vs:
+            if isinstance(vs, (list, tuple)) and len(vs) > 0:
+                voxel_size_nm = vs[0]
+            elif isinstance(vs, (int, float)):
+                voxel_size_nm = vs
+            print(f"  Voxel size: {voxel_size_nm} nm (from dataset metadata)")
+    except Exception:
+        print(f"  Using default voxel size: {voxel_size_nm} nm")
+
+    # 9. Build Three.js data bundle
     print("Building data bundle...")
     regex_term = re.sub(r'[\^$.*+?\[\](){}|\\]', '', pattern)
     bundle = build_data_bundle(
@@ -1741,6 +1904,7 @@ def generate_visualization(pattern, continuous_csvs=None, categorical_csvs=None,
         neuron_upstream, neuron_downstream,
         norm_params, regex_term=regex_term,
         neuron_meshes=neuron_meshes,
+        voxel_size_nm=voxel_size_nm,
         _data_source={'server': server or 'neuprint-cns.janelia.org',
                       'dataset': dataset or 'cns'},
     )
@@ -1748,6 +1912,12 @@ def generate_visualization(pattern, continuous_csvs=None, categorical_csvs=None,
     # 9. Optimize
     print("Optimizing data bundle...")
     bundle = optimize_bundle(bundle)
+
+    # 9b. Embed synapse CSV groups if provided
+    if synapse_csvs:
+        embedded_syn = _process_synapse_csvs(synapse_csvs)
+        if embedded_syn:
+            bundle['embeddedSynapseGroups'] = embedded_syn
 
     # 10. Build HTML immediately (with synapse placeholder)
     out_dir = Path(output_dir) if output_dir else OUTPUT_DIR
@@ -2232,6 +2402,22 @@ class DataStore {
         customMode._neuronColors = Object.assign({}, instanceMode.colors);
         this.colorModes.push(customMode);
 
+        // ── Ensure canonical button order ──────────────────────────────
+        // Cell Type (0) → Instance (1) → Predicted NT (2, if present) → user modes → Custom (last)
+        {
+            const cm = this.colorModes;
+            const move = (pred, targetIdx) => {
+                const i = cm.findIndex(pred);
+                if (i >= 0 && i !== targetIdx && targetIdx < cm.length) {
+                    const [m] = cm.splice(i, 1);
+                    cm.splice(targetIdx, 0, m);
+                }
+            };
+            move(m => m.name === 'Instance', 1);
+            move(m => m.nt_legend, 2);
+            // Custom is already last (pushed above)
+        }
+
         this.sidebarRois = data.sidebarRois;
         this.primaryRoi = data.primaryRoi;
         this.typeRoiMap = data.typeRoiMap;
@@ -2400,12 +2586,13 @@ class SceneManager {
         if (this.data.camera) {
             const cam = this.data.camera;
             this.camera.position.set(cam.eye.x, cam.eye.y, cam.eye.z);
-            // Override Plotly's Z-up (cam.up={0,0,1}) with Dorsal-up (-Y) so the
-            // default Anterior view (-Z) sits at the equator (phi=π/2) rather than
-            // the south pole (phi=π). This gives equal rotational freedom toward
-            // both Dorsal and Ventral — without it, dragging toward Ventral is
-            // immediately clamped by OrbitControls' maxPolarAngle=π.
-            this.camera.up.set(0, -1, 0);
+            // Use up vector from data if it's not the legacy Z-up (0,0,1) which causes
+            // gimbal lock when looking along -Z. New HTMLs embed (0,-1,0) directly.
+            if (cam.up && !(cam.up.x === 0 && cam.up.y === 0 && Math.abs(cam.up.z) === 1)) {
+                this.camera.up.set(cam.up.x, cam.up.y, cam.up.z);
+            } else {
+                this.camera.up.set(0, -1, 0);  // Dorsal-up (-Y)
+            }
         } else {
             this.camera.position.set(0, 0, -0.6);
             this.camera.up.set(0, -1, 0);
@@ -3461,6 +3648,9 @@ class SynapseManager {
         }
         mesh.instanceMatrix.needsUpdate = true;
 
+        // Outline mesh (slightly larger, back-face only)
+        const outlineMesh = this._createOutlineMesh(geo, positions, r);
+
         const groupId = this._nextId++;
         const group = {
             id: groupId,
@@ -3471,6 +3661,7 @@ class SynapseManager {
             direction: opts.direction,
             synapseType: opts.synapseType,
             mesh: mesh,
+            outlineMesh: outlineMesh,
             positions: positions,
             indices: indices,
             color: color,
@@ -3482,8 +3673,91 @@ class SynapseManager {
         mesh.userData = { isSynapse: true, groupId: groupId };
 
         this.viewer.scene.synapseGroup.add(mesh);
+        if (outlineMesh) this.viewer.scene.synapseGroup.add(outlineMesh);
         this.groups.push(group);
         return group;
+    }
+
+    createGroupFromIndices(indices, opts) {
+        // Create synapse group from pre-resolved indices (bypasses filterSynapses)
+        if (!indices || indices.length === 0) return null;
+        const d = this.data;
+        const positions = [];
+        const synapseType = opts.synapseType || 'both';
+        for (const i of indices) {
+            if (synapseType === 'pre' || synapseType === 'both') {
+                positions.push({ x: d.xPre[i], y: d.yPre[i], z: d.zPre[i], idx: i, side: 'pre' });
+            }
+            if (synapseType === 'post' || synapseType === 'both') {
+                positions.push({ x: d.xPost[i], y: d.yPost[i], z: d.zPost[i], idx: i, side: 'post' });
+            }
+        }
+        if (positions.length === 0) return null;
+
+        const color = opts.color || '#ffffff';
+        const geo = this._getSphereGeo();
+        const mat = new THREE.MeshBasicMaterial({ color: color });
+        const mesh = new THREE.InstancedMesh(geo, mat, positions.length);
+        mesh.frustumCulled = false;
+        const dummy = new THREE.Object3D();
+        const r = this._globalRadius;
+        for (let j = 0; j < positions.length; j++) {
+            dummy.position.set(positions[j].x, positions[j].y, positions[j].z);
+            dummy.scale.set(r, r, r);
+            dummy.updateMatrix();
+            mesh.setMatrixAt(j, dummy.matrix);
+        }
+        mesh.instanceMatrix.needsUpdate = true;
+
+        // Outline mesh
+        const outlineMesh = this._createOutlineMesh(geo, positions, r);
+
+        const groupId = this._nextId++;
+        const group = {
+            id: groupId, label: opts.label || 'CSV group',
+            ourType: null, partnerType: null, roi: null,
+            direction: null, synapseType: synapseType,
+            mesh: mesh, outlineMesh: outlineMesh,
+            positions: positions, indices: indices,
+            color: color, useNeuronColor: false, visible: true,
+            count: positions.length, _fromCSV: true,
+        };
+        mesh.userData = { isSynapse: true, groupId: groupId };
+        this.viewer.scene.synapseGroup.add(mesh);
+        if (outlineMesh) this.viewer.scene.synapseGroup.add(outlineMesh);
+        this.groups.push(group);
+        return group;
+    }
+
+    _createOutlineMesh(geo, positions, radius) {
+        const outlineScale = 1.35;  // outline is 35% larger than the sphere
+        const outlineColor = _currentTheme === THEMES.light ? 0x000000 : 0xffffff;
+        const outlineMat = new THREE.MeshBasicMaterial({
+            color: outlineColor, side: THREE.BackSide,
+            depthWrite: false,  // don't write depth so outlines never occlude each other
+        });
+        const outlineMesh = new THREE.InstancedMesh(geo, outlineMat, positions.length);
+        outlineMesh.renderOrder = -1;  // render outlines before fill spheres
+        outlineMesh.frustumCulled = false;
+        const dummy = new THREE.Object3D();
+        const or = radius * outlineScale;
+        for (let j = 0; j < positions.length; j++) {
+            dummy.position.set(positions[j].x, positions[j].y, positions[j].z);
+            dummy.scale.set(or, or, or);
+            dummy.updateMatrix();
+            outlineMesh.setMatrixAt(j, dummy.matrix);
+        }
+        outlineMesh.instanceMatrix.needsUpdate = true;
+        outlineMesh.userData = { isSynapseOutline: true };
+        return outlineMesh;
+    }
+
+    _updateOutlineColors() {
+        // Update all synapse outline mesh colors to match current theme
+        const outlineColor = _currentTheme === THEMES.light ? 0x000000 : 0xffffff;
+        for (const g of this.groups) {
+            if (g.outlineMesh) g.outlineMesh.material.color.setHex(outlineColor);
+        }
     }
 
     removeGroup(groupId) {
@@ -3491,6 +3765,11 @@ class SynapseManager {
         if (idx < 0) return;
         const g = this.groups[idx];
         this.viewer.scene.synapseGroup.remove(g.mesh);
+        if (g.outlineMesh) {
+            this.viewer.scene.synapseGroup.remove(g.outlineMesh);
+            g.outlineMesh.material.dispose();
+            g.outlineMesh.dispose();
+        }
         g.mesh.geometry !== this._sphereGeo && g.mesh.geometry.dispose();
         g.mesh.material.dispose();
         g.mesh.dispose();
@@ -3502,6 +3781,7 @@ class SynapseManager {
         if (!g) return;
         g.visible = !g.visible;
         g.mesh.visible = g.visible;
+        if (g.outlineMesh) g.outlineMesh.visible = g.visible;
     }
 
     setGroupColor(groupId, color, useNeuronColor) {
@@ -3514,6 +3794,8 @@ class SynapseManager {
 
     setGlobalSize(radius) {
         this._globalRadius = radius;
+        const outlineScale = 1.35;
+        const or = radius * outlineScale;
         const dummy = new THREE.Object3D();
         for (const g of this.groups) {
             for (let j = 0; j < g.positions.length; j++) {
@@ -3521,8 +3803,14 @@ class SynapseManager {
                 dummy.scale.set(radius, radius, radius);
                 dummy.updateMatrix();
                 g.mesh.setMatrixAt(j, dummy.matrix);
+                if (g.outlineMesh) {
+                    dummy.scale.set(or, or, or);
+                    dummy.updateMatrix();
+                    g.outlineMesh.setMatrixAt(j, dummy.matrix);
+                }
             }
             g.mesh.instanceMatrix.needsUpdate = true;
+            if (g.outlineMesh) g.outlineMesh.instanceMatrix.needsUpdate = true;
         }
     }
 
@@ -3661,6 +3949,19 @@ class SessionManager {
             // Color filter UI
             _cbarMinPct: ui._cbarMinPct || 0,
             _cbarMaxPct: ui._cbarMaxPct || 100,
+            // Uploaded color modes — name-based persistence
+            activeColorModeName: this.viewer.data.colorModes[vis.activeColorMode]?.name || null,
+            uploadedColorModes: this.viewer.data.colorModes
+                .filter(m => m.is_uploaded)
+                .map(m => ({
+                    name: m.name, colors: m.colors, type_colors: m.type_colors,
+                    is_scalar: m.is_scalar, is_instance_level: m.is_instance_level || false,
+                    is_categorical: m.is_categorical || false,
+                    cmin: m.cmin, cmax: m.cmax, colorscale: m.colorscale, label: m.label,
+                    type_values: m.type_values || null,
+                })),
+            // Uploaded synapse CSVs
+            uploadedSynapseCSVs: synMgr?._uploadedCSVs || [],
         };
 
         try {
@@ -3711,38 +4012,61 @@ class SessionManager {
                 Object.assign(customMode._neuronColors, s.customNeuronColors);
         }
 
-        // 2. Switch type/neuron mode if needed
+        // 2. Restore uploaded color modes (before switching mode or color)
+        if (s.uploadedColorModes && s.uploadedColorModes.length > 0) {
+            for (const um of s.uploadedColorModes) {
+                // Skip if a mode with this name already exists (e.g., from re-upload)
+                if (this.viewer.data.colorModes.find(m => m.name === um.name)) continue;
+                const mode = Object.assign({}, um, { is_uploaded: true });
+                const insertIdx = this.viewer.data.colorModes.length - 1; // before Custom
+                this.viewer.data.colorModes.splice(insertIdx, 0, mode);
+                if (ui._colorSection) {
+                    ui._addColorModeButton(mode, insertIdx, ui._colorSection,
+                        'width:32px;height:32px;border:1px solid #555;border-radius:3px;cursor:pointer;background:#222;color:#fff;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;padding:0;font-size:15px;box-sizing:border-box;');
+                }
+            }
+            if (ui._reindexColorButtons) ui._reindexColorButtons();
+            if (ui._updateInstanceBtnState) ui._updateInstanceBtnState();
+        }
+
+        // 3. Switch type/neuron mode if needed
         if (s.hlModeByNeuron !== ui.hlModeByNeuron && ui._switchMode) {
             ui._switchMode(s.hlModeByNeuron, true);
         }
 
-        // 3. Restore highlightedSet and clipToRoi
+        // 4. Restore highlightedSet and clipToRoi
         vis.highlightedSet = new Set(s.highlightedSet || []);
         vis._explicitHideAll = s._explicitHideAll || false;
         vis.clipToRoi = s.clipToRoi || {};
 
-        // 4. Restore color mode
-        if (s.activeColorMode != null && s.activeColorMode < this.viewer.data.colorModes.length) {
-            vis.switchColorMode(s.activeColorMode);
-            // Update top bar button styling
-            const topBar = ui.topBar;
-            if (topBar) {
-                topBar.querySelectorAll('button[data-colormode]').forEach(b => {
-                    b.style.background = '#222'; b.style.color = '#fff';
-                });
-                const activeBtn = topBar.querySelector(`button[data-colormode="${s.activeColorMode}"]`);
-                if (activeBtn) { activeBtn.style.background = 'rgb(212,160,23)'; activeBtn.style.color = '#000'; }
+        // 5. Restore color mode (resolve by name first, fall back to index)
+        {
+            let targetIdx = s.activeColorMode;
+            if (s.activeColorModeName) {
+                const byName = this.viewer.data.colorModes.findIndex(m => m.name === s.activeColorModeName);
+                if (byName >= 0) targetIdx = byName;
+            }
+            if (targetIdx != null && targetIdx >= 0 && targetIdx < this.viewer.data.colorModes.length) {
+                vis.switchColorMode(targetIdx);
+                const topBar = ui.topBar;
+                if (topBar) {
+                    topBar.querySelectorAll('button[data-colormode]').forEach(b => {
+                        b.style.background = '#222'; b.style.color = '#fff';
+                    });
+                    const activeBtn = topBar.querySelector(`button[data-colormode="${targetIdx}"]`);
+                    if (activeBtn) { activeBtn.style.background = 'rgb(212,160,23)'; activeBtn.style.color = '#000'; }
+                }
             }
         }
 
-        // 5. Restore ROI visibility
+        // 6. Restore ROI visibility
         if (s.roiChecked) {
             for (const [roi, checked] of Object.entries(s.roiChecked)) {
                 vis.setRoiChecked(roi, checked);
             }
         }
 
-        // 6. Restore somata visibility
+        // 7. Restore somata visibility
         if (s._somataVisible === false) {
             vis._somataVisible = false;
             for (const [, mesh] of vis.scene.somaGeom || new Map()) {
@@ -3750,7 +4074,7 @@ class SessionManager {
             }
         }
 
-        // 7. Restore camera
+        // 8. Restore camera
         if (s.camera) {
             const p = s.camera.pos, t = s.camera.tgt, u = s.camera.up;
             scene.camera.position.set(p.x, p.y, p.z);
@@ -3759,7 +4083,7 @@ class SessionManager {
             scene.controls.update();
         }
 
-        // 8. Restore saved view/set banks
+        // 9. Restore saved view/set banks
         if (s.savedViews) {
             ui._savedViews = s.savedViews;
             ui._activeViewIdx = null;
@@ -3777,14 +4101,14 @@ class SessionManager {
             ui._roiActiveSetIdx = null;
         }
 
-        // 9. Restore color filter state
+        // 10. Restore color filter state
         if (s.colorFilteredOutTypes) vis.colorFilteredOutTypes = new Set(s.colorFilteredOutTypes);
         if (s.colorFilteredOutNeurons) vis.colorFilteredOutNeurons = new Set(s.colorFilteredOutNeurons);
         if (s.colorFilterMin != null) vis.colorFilterMin = s.colorFilterMin;
         if (s.colorFilterMax != null) vis.colorFilterMax = s.colorFilterMax;
         if (s.activeNTs) vis.activeNTs = new Set(s.activeNTs);
 
-        // 10. Restore synapse groups
+        // 11. Restore synapse groups
         if (synMgr && synMgr.loaded && s.synapseGroups && s.synapseGroups.length > 0) {
             if (s.globalRadius) synMgr._globalRadius = s.globalRadius;
             for (const sg of s.synapseGroups) {
@@ -3808,7 +4132,15 @@ class SessionManager {
             }
         }
 
-        // 11. Final sync
+        // 12. Restore uploaded synapse CSVs
+        if (synMgr && synMgr.loaded && s.uploadedSynapseCSVs && s.uploadedSynapseCSVs.length > 0) {
+            synMgr._uploadedCSVs = s.uploadedSynapseCSVs;
+            for (const csv of s.uploadedSynapseCSVs) {
+                if (ui._handleSynapseCSVUpload) ui._handleSynapseCSVUpload(csv.text, csv.filename, true);
+            }
+        }
+
+        // 13. Final sync
         vis._applyAllVisibility();
         if (ui._rebuildPanelContent) ui._rebuildPanelContent();
         ui.syncAllState();
@@ -3829,12 +4161,9 @@ class SessionManager {
         const data = localStorage.getItem(this.storageKey);
         if (!data) return;
         const blob = new Blob([data], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${this.storageKey}_session.json`;
-        a.click();
-        URL.revokeObjectURL(url);
+        _saveFileAs(blob, `${this.storageKey}_session.json`, [
+            { description: 'JSON Session', accept: { 'application/json': ['.json'] } }
+        ]);
     }
 
     importJSON(jsonString) {
@@ -3848,6 +4177,45 @@ class SessionManager {
             alert('Failed to import session: ' + e.message);
         }
     }
+}
+
+// ---- Save File Helper ----
+// Uses File System Access API (showSaveFilePicker) when available for directory+name control.
+// Falls back to classic a.download for unsupported browsers.
+// Persists the last-used directory handle across saves within a session.
+// After the first save, subsequent saves default to the same folder.
+let _lastDirHandle = null;
+
+async function _saveFileAs(blob, defaultName, fileTypes) {
+    if (window.showSaveFilePicker) {
+        try {
+            const opts = {
+                suggestedName: defaultName,
+                types: fileTypes || [{ description: 'File', accept: { 'application/octet-stream': [''] } }],
+            };
+            // Re-use last directory so the dialog opens where user last saved
+            if (_lastDirHandle) opts.startIn = _lastDirHandle;
+            const handle = await window.showSaveFilePicker(opts);
+            const writable = await handle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            // Remember this file's parent directory for next time.
+            // getParent() is only available if the page has permission to the parent dir,
+            // but we can store the file handle itself as startIn (browsers accept either).
+            _lastDirHandle = handle;
+            return;
+        } catch (e) {
+            if (e.name === 'AbortError') return;  // user cancelled
+            // Fall through to legacy download
+        }
+    }
+    // Legacy fallback
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = defaultName;
+    a.click();
+    URL.revokeObjectURL(url);
 }
 
 // ---- Visibility Manager ----
@@ -4609,6 +4977,36 @@ class InteractionManager {
         return null;
     }
 
+    _showMeshFullPreview(mesh) {
+        // Temporarily restore full (unclipped) mesh faces for hover preview
+        if (!mesh || !mesh._fullIndex) return;
+        const geom = mesh.geometry;
+        const currentIndex = geom.index;
+        // Save current clipped index if different from full
+        if (currentIndex && currentIndex.array.length !== mesh._fullIndex.length) {
+            mesh.userData._savedIndex = currentIndex;
+            geom.setIndex(new THREE.BufferAttribute(new Uint32Array(mesh._fullIndex), 1));
+            mesh.userData._hoverFullRestore = true;
+        }
+        // Also ensure visible + full opacity
+        if (!mesh.visible) {
+            mesh.visible = true;
+            mesh.userData._hoverShown = true;
+        }
+        mesh.material.opacity = 1.0;
+        mesh.material.transparent = false;
+    }
+
+    _clearMeshFullPreview(mesh) {
+        // Restore clipped index buffer after hover preview
+        if (!mesh) return;
+        if (mesh.userData._hoverFullRestore && mesh.userData._savedIndex) {
+            mesh.geometry.setIndex(mesh.userData._savedIndex);
+            delete mesh.userData._savedIndex;
+            delete mesh.userData._hoverFullRestore;
+        }
+    }
+
     _showHoverPreview(typeName, bodyId) {
         // Only preview highlighted + clipped entities
         const key = this._hoverPreviewKey({ type: typeName, bodyId });
@@ -4616,14 +5014,20 @@ class InteractionManager {
 
         this._hoverPreviewActive = true;
         this._hoverPreviewType = key;
+        const showMesh = this.vis._meshesVisible;
 
-        // Neuron mode: show full skeleton + soma for the specific neuron
+        // Neuron mode: show full geometry + soma for the specific neuron
         if (bodyId && this.vis.highlightedSet.has(bodyId)) {
-            const geom = this.scene.neuronFullGeom.get(bodyId);
-            if (geom && !geom.visible) {
-                geom.visible = true;
-                VisibilityManager.setOpacity(geom, 1.0);
-                geom.userData._hoverShown = true;
+            if (showMesh) {
+                const mesh = this.scene.neuronMeshGeom.get(bodyId);
+                if (mesh) this._showMeshFullPreview(mesh);
+            } else {
+                const geom = this.scene.neuronFullGeom.get(bodyId);
+                if (geom && !geom.visible) {
+                    geom.visible = true;
+                    VisibilityManager.setOpacity(geom, 1.0);
+                    geom.userData._hoverShown = true;
+                }
             }
             const soma = this.scene.somaGeom.get(bodyId);
             if (soma && this.vis._somataVisible && soma.material.opacity < 0.5) {
@@ -4632,15 +5036,22 @@ class InteractionManager {
                 soma.userData._hoverShown = true;
             }
         } else if (this.vis.highlightedSet.has(typeName)) {
-            // Type mode: show full skeletons + somas for all neurons of this type
-            for (const { geom } of this.scene.getTypeFullGeometries(typeName)) {
-                if (!geom.visible) {
-                    geom.visible = true;
-                    VisibilityManager.setOpacity(geom, 1.0);
-                    geom.userData._hoverShown = true;
+            // Type mode: show full geometries + somas for all neurons of this type
+            const bids = this.data.getNeuronsForType(typeName);
+            if (showMesh) {
+                for (const bid of bids) {
+                    const mesh = this.scene.neuronMeshGeom.get(bid);
+                    if (mesh) this._showMeshFullPreview(mesh);
+                }
+            } else {
+                for (const { geom } of this.scene.getTypeFullGeometries(typeName)) {
+                    if (!geom.visible) {
+                        geom.visible = true;
+                        VisibilityManager.setOpacity(geom, 1.0);
+                        geom.userData._hoverShown = true;
+                    }
                 }
             }
-            const bids = this.data.getNeuronsForType(typeName);
             for (const bid of bids) {
                 const soma = this.scene.somaGeom.get(bid);
                 if (soma && this.vis._somataVisible && soma.material.opacity < 0.5) {
@@ -4654,12 +5065,22 @@ class InteractionManager {
 
     _clearHoverPreview() {
         if (!this._hoverPreviewActive) return;
-        // Hide all full geometries we temporarily showed
+        // Hide all full skeleton geometries we temporarily showed
         for (const child of this.scene.fullGroup.children) {
             if (child.userData._hoverShown) {
                 child.visible = false;
                 VisibilityManager.setOpacity(child, 1.0);
                 delete child.userData._hoverShown;
+            }
+        }
+        // Restore mesh geometries — revert full-index preview and hide if needed
+        if (this.scene.meshGroup) {
+            for (const child of this.scene.meshGroup.children) {
+                this._clearMeshFullPreview(child);
+                if (child.userData._hoverShown) {
+                    child.visible = false;
+                    delete child.userData._hoverShown;
+                }
             }
         }
         // Restore somas we temporarily showed
@@ -4871,7 +5292,7 @@ class UIManager {
 
     _buildTopBar() {
         const bar = document.createElement('div');
-        bar.style.cssText = `position:fixed;top:0;left:${SIDEBAR_W}px;right:${TYPE_PANEL_W}px;height:${TOP_BAR_H}px;background:rgba(20,20,20,0.95);display:flex;align-items:center;padding:0 8px;gap:10px;z-index:100;border-bottom:1px solid #333;user-select:none;`;
+        bar.style.cssText = `position:fixed;top:0;left:${SIDEBAR_W}px;right:${TYPE_PANEL_W}px;height:${TOP_BAR_H}px;background:rgba(20,20,20,0.95);display:flex;align-items:center;padding:0 8px;gap:10px;z-index:100;border-bottom:1px solid #333;user-select:none;overflow:hidden;`;
         this._topBarEl = bar;
 
         // Color-by scrollable section
@@ -4879,9 +5300,16 @@ class UIManager {
         this._colorSection = colorSection;
         colorSection.className = 'color-scroll';
         colorSection.style.cssText = 'display:flex;align-items:center;gap:6px;overflow-x:auto;flex:1;min-width:0;padding-right:8px;scrollbar-width:none;';
+        // Convert vertical mouse wheel to horizontal scroll on the color button bar
+        colorSection.addEventListener('wheel', (e) => {
+            if (colorSection.scrollWidth > colorSection.clientWidth) {
+                e.preventDefault();
+                colorSection.scrollLeft += e.deltaY;
+            }
+        }, { passive: false });
         // Hide scrollbar in webkit browsers (Chrome/Safari)
         const scrollStyle = document.createElement('style');
-        scrollStyle.textContent = '.color-scroll::-webkit-scrollbar{display:none;}';
+        scrollStyle.textContent = '.color-scroll::-webkit-scrollbar{display:none;}.right-scroll::-webkit-scrollbar{display:none;}';
         document.head.appendChild(scrollStyle);
 
         const colorLabel = document.createElement('span');
@@ -4889,61 +5317,16 @@ class UIManager {
         colorLabel.style.cssText = 'font-size:14px;font-weight:bold;color:#fff;flex-shrink:0;';
         colorSection.appendChild(colorLabel);
 
-        // Color mode buttons
-        this.data.colorModes.forEach((mode, idx) => {
-            const btn = document.createElement('button');
-            btn.textContent = mode.name;
-            btn.dataset.tip = `Color by ${mode.name}`;
-            btn.style.cssText = `height:32px;padding:0 10px;border:1px solid #555;border-radius:3px;cursor:pointer;font-size:12px;flex-shrink:0;white-space:nowrap;box-sizing:border-box;${idx === 0 ? 'background:rgb(212,160,23);color:#000;' : 'background:#222;color:#fff;'}`;
-            btn.onclick = () => {
-                // If Predicted NT auto-switched us to neuron mode, silently restore
-                // type mode before changing color — user never manually requested neuron mode
-                const wasNtAutoSwitched = this._ntAutoSwitchedNeuron && this.hlModeByNeuron;
-                if (wasNtAutoSwitched && this._switchMode) {
-                    this._ntAutoSwitchedNeuron = false;
-                    this._switchMode(false, true);  // isAuto keeps internal consistency
-                }
-                // Preserve clip-all state across color mode switches
-                const clipAllWasChecked = this.clipAllCb && this.clipAllCb.checked;
-                // Clear color filter from previous mode before switching.
-                // If we just auto-switched from neuron→type mode, _filterRemovedHighlights
-                // contains bodyIds (neuron mode) that are meaningless in type mode — discard them.
-                // Otherwise restore them so the highlighted set is complete for the new mode.
-                if (!wasNtAutoSwitched && this.vis._filterRemovedHighlights) {
-                    for (const k of this.vis._filterRemovedHighlights) {
-                        this.vis.highlightedSet.add(k);
-                        // Restored items should inherit clip-all state
-                        if (clipAllWasChecked) this.vis.clipToRoi[k] = true;
-                    }
-                }
-                this.vis._filterRemovedHighlights = null;
-                this.vis.colorFilteredOutTypes.clear();
-                this.vis.colorFilteredOutNeurons.clear();
-                this.vis.activeNTs = null;
-                this._filterUncheckedRois = null;  // Clear auto-uncheck tracking
-                this.vis.switchColorMode(idx);
-                // Resync 3D visibility to match current highlightedSet — the panel always wins
-                this.vis._applyAllVisibility();
-                colorSection.querySelectorAll('button[data-colormode]').forEach(b => {
-                    b.style.background = '#222';
-                    b.style.color = '#fff';
-                });
-                btn.style.background = 'rgb(212,160,23)';
-                btn.style.color = '#000';
-                this._updateColorbar(this.data.colorModes[idx]);
-                this._updatePanelSwatches();
-                this.syncAllState();  // Reset ROI panel and sidebar styling
-            };
-            btn.dataset.colormode = idx;
-            btn.oncontextmenu = (e) => { e.preventDefault(); const m = this.data.colorModes[idx]; if (this.vis.activeColorMode === idx && !m.is_custom) this._showColormapMenu(e, idx); };
-            if (mode.name === 'Instance') this._instanceBtn = btn;
-            colorSection.appendChild(btn);
-        });
-
-        // Shuffle button — randomizes color assignments for categorical modes
         // Shared style for all square icon buttons — fixed 32x32, centered content
         const _iconBtnStyle = 'width:32px;height:32px;border:1px solid #555;border-radius:3px;cursor:pointer;background:#222;color:#fff;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;padding:0;font-size:15px;box-sizing:border-box;';
 
+        // Color mode buttons — use name-based lookup so indices stay correct after dynamic insertion
+        this._instanceLevelBtns = [];
+        this.data.colorModes.forEach((mode, idx) => {
+            this._addColorModeButton(mode, idx, colorSection, _iconBtnStyle);
+        });
+
+        // Shuffle button — randomizes color assignments for categorical modes
         const shuffleBtn = document.createElement('button');
         shuffleBtn.textContent = '\u{1F500}';
         shuffleBtn.dataset.tip = 'Shuffle colors';
@@ -4952,42 +5335,41 @@ class UIManager {
         colorSection.appendChild(shuffleBtn);
         this._shuffleBtn = shuffleBtn;
 
+        // CSV upload button — add new color mode from file
+        const uploadBtn = document.createElement('button');
+        uploadBtn.textContent = '+';
+        uploadBtn.dataset.tip = 'Upload color CSV';
+        uploadBtn.style.cssText = _iconBtnStyle + 'font-size:18px;font-weight:bold;';
+        uploadBtn.onclick = () => {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.csv';
+            input.onchange = (ev) => {
+                const file = ev.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (re) => this._handleColorCSVUpload(re.target.result, file.name);
+                reader.readAsText(file);
+            };
+            input.click();
+        };
+        colorSection.appendChild(uploadBtn);
+
         bar.appendChild(colorSection);
         // Initial state for Instance button (grayed in type mode)
         setTimeout(() => this._updateInstanceBtnState(), 0);
 
         // Right-side group: pushed to far right
         const rightGroup = document.createElement('div');
-        rightGroup.style.cssText = 'margin-left:auto;display:flex;align-items:center;gap:10px;flex-shrink:0;';
-
-        // Vertical divider before Neuron size
-        const divider = document.createElement('div');
-        divider.style.cssText = 'width:1px;height:24px;background:#555;flex-shrink:0;';
-        rightGroup.appendChild(divider);
-
-        // Neuron size
-        const sizeLabel = document.createElement('span');
-        sizeLabel.textContent = 'Neuron size:';
-        sizeLabel.style.cssText = 'font-size:14px;font-weight:bold;color:#fff;white-space:nowrap;';
-        rightGroup.appendChild(sizeLabel);
-
-        const slider = document.createElement('input');
-        slider.type = 'range';
-        slider.min = '0.1';
-        slider.max = '10';
-        slider.step = '0.1';
-        slider.value = String(this.data.initialLineWidth);
-        slider.style.cssText = 'width:80px;';
-        rightGroup.appendChild(slider);
-
-        const sizeVal = document.createElement('span');
-        sizeVal.textContent = String(this.data.initialLineWidth);
-        sizeVal.style.cssText = 'font-size:12px;color:#ccc;width:24px;';
-        slider.oninput = () => {
-            sizeVal.textContent = slider.value;
-            _globalLineWidth.value = parseFloat(slider.value);
-        };
-        rightGroup.appendChild(sizeVal);
+        rightGroup.className = 'right-scroll';
+        rightGroup.style.cssText = 'margin-left:auto;display:flex;align-items:center;gap:10px;flex-shrink:1;min-width:0;max-width:60%;overflow-x:auto;scrollbar-width:none;';
+        // Convert vertical mouse wheel to horizontal scroll on the right button bar
+        rightGroup.addEventListener('wheel', (e) => {
+            if (rightGroup.scrollWidth > rightGroup.clientWidth) {
+                e.preventDefault();
+                rightGroup.scrollLeft += e.deltaY;
+            }
+        }, { passive: false });
 
         // Z-section divider and slider
         const zDivider = document.createElement('div');
@@ -5036,31 +5418,6 @@ class UIManager {
             this._updateGizmo();
         };
 
-        // Hover preview toggle
-        const hoverLabel = document.createElement('span');
-        hoverLabel.textContent = 'Preview on hover';
-        hoverLabel.style.cssText = 'font-size:14px;font-weight:bold;color:#fff;';
-        rightGroup.appendChild(hoverLabel);
-
-        const hoverSwitch = document.createElement('div');
-        hoverSwitch.style.cssText = 'position:relative;width:40px;height:20px;background:#555;border-radius:10px;cursor:pointer;flex-shrink:0;';
-        const hoverThumb = document.createElement('div');
-        hoverThumb.style.cssText = 'position:absolute;top:2px;left:2px;width:16px;height:16px;background:#fff;border-radius:50%;transition:left 0.2s;';
-        hoverSwitch.appendChild(hoverThumb);
-        hoverSwitch.onclick = () => {
-            const on = hoverThumb.style.left === '20px';
-            if (on) {
-                hoverThumb.style.left = '2px';
-                hoverSwitch.style.background = '#555';
-                this.viewer.hoverPreviewEnabled = false;
-            } else {
-                hoverThumb.style.left = '20px';
-                hoverSwitch.style.background = 'rgb(212,160,23)';
-                this.viewer.hoverPreviewEnabled = true;
-            }
-        };
-        rightGroup.appendChild(hoverSwitch);
-
         // Pan mode toggle
         const panBtn = document.createElement('button');
         panBtn.textContent = '\u2725';
@@ -5108,7 +5465,7 @@ class UIManager {
 
         // Session export button
         const exportBtn = document.createElement('button');
-        exportBtn.textContent = '\u2B07';
+        exportBtn.textContent = '\uD83D\uDCBE';
         exportBtn.dataset.tip = 'Save session';
         exportBtn.style.cssText = _iconBtnStyle;
         exportBtn.onclick = () => { if (this.viewer.session) this.viewer.session.exportJSON(); };
@@ -5116,7 +5473,7 @@ class UIManager {
 
         // Session import button
         const importBtn = document.createElement('button');
-        importBtn.textContent = '\u2B06';
+        importBtn.textContent = '\uD83D\uDCC2';
         importBtn.dataset.tip = 'Load session';
         importBtn.style.cssText = _iconBtnStyle;
         importBtn.onclick = () => {
@@ -5154,9 +5511,6 @@ class UIManager {
             const compCtx = compCanvas.getContext('2d');
             compCtx.drawImage(s.canvas, 0, 0);
             if (s._scaleBarCanvas) compCtx.drawImage(s._scaleBarCanvas, 0, 0, compCanvas.width, compCanvas.height);
-            const url = compCanvas.toDataURL('image/png');
-            const a = document.createElement('a');
-            a.href = url;
             const p = s.camera.position;
             const t = s.controls.target;
             const d = p.distanceTo(t);
@@ -5172,8 +5526,12 @@ class UIManager {
             } else {
                 cfStr += `_pmin${this._cbarMinPct || 0}_pmax${this._cbarMaxPct !== undefined ? this._cbarMaxPct : 100}`;
             }
-            a.download = `${term}_pos${f(p.x)}_${f(p.y)}_${f(p.z)}_tgt${f(t.x)}_${f(t.y)}_${f(t.z)}_d${f(d)}_z${zPct}${cfStr}.png`;
-            a.click();
+            const fname = `${term}_pos${f(p.x)}_${f(p.y)}_${f(p.z)}_tgt${f(t.x)}_${f(t.y)}_${f(t.z)}_d${f(d)}_z${zPct}${cfStr}.png`;
+            compCanvas.toBlob((blob) => {
+                _saveFileAs(blob, fname, [
+                    { description: 'PNG Image', accept: { 'image/png': ['.png'] } }
+                ]);
+            }, 'image/png');
         };
         rightGroup.appendChild(snapBtn);
 
@@ -5194,6 +5552,524 @@ class UIManager {
 
         // ---- Camera info panel (floating, top-right) ----
         this._buildCameraPanel();
+    }
+
+    // ── Color mode button creation (shared by init + dynamic upload) ────
+    _addColorModeButton(mode, idx, colorSection, iconStyle) {
+        const btn = document.createElement('button');
+        btn.textContent = mode.name;
+        btn.dataset.tip = `Color by ${mode.name}`;
+        btn.dataset.colormodename = mode.name;
+        btn.dataset.colormode = idx;
+        btn.style.cssText = `height:32px;padding:0 10px;border:1px solid #555;border-radius:3px;cursor:pointer;font-size:12px;flex-shrink:0;white-space:nowrap;box-sizing:border-box;${idx === 0 ? 'background:rgb(212,160,23);color:#000;' : 'background:#222;color:#fff;'}`;
+        btn.onclick = () => {
+            const mIdx = this.data.colorModes.findIndex(m => m.name === mode.name);
+            if (mIdx < 0) return;
+            // If Predicted NT auto-switched us to neuron mode, silently restore
+            const wasNtAutoSwitched = this._ntAutoSwitchedNeuron && this.hlModeByNeuron;
+            if (wasNtAutoSwitched && this._switchMode) {
+                this._ntAutoSwitchedNeuron = false;
+                this._switchMode(false, true);
+            }
+            const clipAllWasChecked = this.clipAllCb && this.clipAllCb.checked;
+            if (!wasNtAutoSwitched && this.vis._filterRemovedHighlights) {
+                for (const k of this.vis._filterRemovedHighlights) {
+                    this.vis.highlightedSet.add(k);
+                    if (clipAllWasChecked) this.vis.clipToRoi[k] = true;
+                }
+            }
+            this.vis._filterRemovedHighlights = null;
+            this.vis.colorFilteredOutTypes.clear();
+            this.vis.colorFilteredOutNeurons.clear();
+            this.vis.activeNTs = null;
+            this._filterUncheckedRois = null;
+            this.vis.switchColorMode(mIdx);
+            this.vis._applyAllVisibility();
+            this._colorSection.querySelectorAll('button[data-colormode]').forEach(b => {
+                b.style.background = '#222'; b.style.color = '#fff';
+            });
+            btn.style.background = 'rgb(212,160,23)'; btn.style.color = '#000';
+            this._updateColorbar(this.data.colorModes[mIdx]);
+            this._updatePanelSwatches();
+            this.syncAllState();
+        };
+        btn.oncontextmenu = (e) => {
+            e.preventDefault();
+            const mIdx = this.data.colorModes.findIndex(m => m.name === mode.name);
+            if (mIdx >= 0 && !mode.is_custom) {
+                // Allow right-click for active mode (colormap swap) OR any uploaded mode (remove option)
+                if (this.vis.activeColorMode === mIdx || mode.is_uploaded)
+                    this._showColormapMenu(e, mIdx);
+            }
+        };
+        if (mode.name === 'Instance' || mode.is_instance_level || mode.nt_legend) {
+            this._instanceLevelBtns.push(btn);
+        }
+        // Insert before shuffle button (if present) or append
+        if (this._shuffleBtn && colorSection.contains(this._shuffleBtn)) {
+            colorSection.insertBefore(btn, this._shuffleBtn);
+        } else {
+            colorSection.appendChild(btn);
+        }
+        return btn;
+    }
+
+    _reindexColorButtons() {
+        // Update data-colormode indices on all buttons to match current array positions
+        this._colorSection.querySelectorAll('button[data-colormodename]').forEach(btn => {
+            const name = btn.dataset.colormodename;
+            const idx = this.data.colorModes.findIndex(m => m.name === name);
+            if (idx >= 0) btn.dataset.colormode = idx;
+        });
+    }
+
+    // ── CSV parsing and color mode upload ────────────────────────────
+    _parseCSV(text) {
+        const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+        if (lines.length < 2) return null;
+        const parseLine = (line) => {
+            const fields = [];
+            let cur = '', inQ = false;
+            for (let i = 0; i < line.length; i++) {
+                const ch = line[i];
+                if (ch === '"') { inQ = !inQ; continue; }
+                if (ch === ',' && !inQ) { fields.push(cur.trim()); cur = ''; continue; }
+                cur += ch;
+            }
+            fields.push(cur.trim());
+            return fields;
+        };
+        const headers = parseLine(lines[0]);
+        const rows = [];
+        for (let i = 1; i < lines.length; i++) {
+            const r = parseLine(lines[i]);
+            if (r.length >= headers.length) rows.push(r);
+        }
+        return { headers, rows };
+    }
+
+    _interpolateColorscale(stops, t) {
+        // stops: [[0, "rgb(r,g,b)"], [0.016, "rgb(...)"], ...] — 64 entries
+        t = Math.max(0, Math.min(1, t));
+        let lo = 0, hi = stops.length - 1;
+        for (let i = 0; i < stops.length - 1; i++) {
+            if (t >= stops[i][0] && t <= stops[i+1][0]) { lo = i; hi = i + 1; break; }
+        }
+        const frac = stops[hi][0] === stops[lo][0] ? 0 : (t - stops[lo][0]) / (stops[hi][0] - stops[lo][0]);
+        const parse = (s) => s.match(/\d+/g).map(Number);
+        const cLo = parse(stops[lo][1]), cHi = parse(stops[hi][1]);
+        const r = Math.round(cLo[0] + (cHi[0] - cLo[0]) * frac);
+        const g = Math.round(cLo[1] + (cHi[1] - cLo[1]) * frac);
+        const b = Math.round(cLo[2] + (cHi[2] - cLo[2]) * frac);
+        return `rgb(${r},${g},${b})`;
+    }
+
+    _buildColorscale(divergent) {
+        // Generate 64-stop colorscale. Divergent: blue→white→red. Sequential: white→orange.
+        const stops = [];
+        for (let i = 0; i < 64; i++) {
+            const t = i / 63;
+            let r, g, b;
+            if (divergent) {
+                // RdBu-like: blue(0) → white(0.5) → red(1)
+                if (t < 0.5) {
+                    const f = t / 0.5;
+                    r = Math.round(33 + (255 - 33) * f);
+                    g = Math.round(102 + (255 - 102) * f);
+                    b = Math.round(172 + (255 - 172) * f);
+                } else {
+                    const f = (t - 0.5) / 0.5;
+                    r = Math.round(255);
+                    g = Math.round(255 - (255 - 44) * f);
+                    b = Math.round(255 - (255 - 37) * f);
+                }
+            } else {
+                // Oranges-like: white(0) → orange(1)
+                r = Math.round(255);
+                g = Math.round(245 - (245 - 69) * t);
+                b = Math.round(235 - (235 - 0) * t);
+            }
+            stops.push([Math.round(t * 1000) / 1000, `rgb(${r},${g},${b})`]);
+        }
+        return stops;
+    }
+
+    _createUploadedColorMode(name, keyCol, valueMap, isInstanceLevel, customColorMap) {
+        // keyCol: 'type' or 'bodyid' — determines how to map colors to neurons
+        // valueMap: {key: rawValue} from CSV
+        // customColorMap: optional {key: cssColor} from a paired color column
+        const allBids = Object.keys(this.data.bidTypeMap);
+        const values = Object.values(valueMap);
+        const isNumeric = values.every(v => v !== '' && isFinite(Number(v)));
+
+        const mode = {
+            name: name,
+            colors: {},
+            type_colors: {},
+            is_scalar: false,
+            is_instance_level: isInstanceLevel,
+            is_uploaded: true,
+            label: name,
+        };
+
+        if (isNumeric) {
+            // ── Continuous / scalar mode ──
+            const numMap = {};
+            for (const [k, v] of Object.entries(valueMap)) numMap[k] = Number(v);
+            const vals = Object.values(numMap);
+            const cmin = Math.min(...vals);
+            const cmax = Math.max(...vals);
+            const divergent = cmin < 0 && cmax > 0;
+            const range = cmax - cmin || 1;
+
+            // Build colorscale: use custom colors if provided, else auto-generate
+            let colorscale;
+            if (customColorMap) {
+                // Build colorscale from value→color pairs sorted by numeric value
+                const colorPairs = [];
+                for (const [key, val] of Object.entries(numMap)) {
+                    if (customColorMap[key]) colorPairs.push([val, customColorMap[key]]);
+                }
+                colorPairs.sort((a, b) => a[0] - b[0]);
+                if (colorPairs.length >= 2) {
+                    colorscale = colorPairs.map(([v, c]) => [(v - cmin) / range, c]);
+                    // Ensure we have stops at 0 and 1
+                    if (colorscale[0][0] > 0) colorscale.unshift([0, colorscale[0][1]]);
+                    if (colorscale[colorscale.length - 1][0] < 1) colorscale.push([1, colorscale[colorscale.length - 1][1]]);
+                } else {
+                    colorscale = this._buildColorscale(divergent);
+                }
+            } else {
+                colorscale = this._buildColorscale(divergent);
+            }
+
+            mode.is_scalar = true;
+            mode.cmin = cmin;
+            mode.cmax = cmax;
+            mode.colorscale = colorscale;
+
+            if (isInstanceLevel) {
+                // keyed by bodyId
+                const typeFirstColor = {};
+                for (const bid of allBids) {
+                    const val = numMap[bid];
+                    if (val != null) {
+                        // Use direct custom color if available, else interpolate colorscale
+                        if (customColorMap && customColorMap[bid]) {
+                            mode.colors[bid] = customColorMap[bid];
+                        } else {
+                            const t = (val - cmin) / range;
+                            mode.colors[bid] = this._interpolateColorscale(colorscale, t);
+                        }
+                    } else {
+                        mode.colors[bid] = 'rgb(128,128,128)';
+                    }
+                    const typ = this.data.bidTypeMap[bid];
+                    if (typ && !typeFirstColor[typ]) typeFirstColor[typ] = mode.colors[bid];
+                }
+                mode.type_colors = typeFirstColor;
+            } else {
+                // keyed by type
+                const typeColors = {};
+                for (const [typ, val] of Object.entries(numMap)) {
+                    if (customColorMap && customColorMap[typ]) {
+                        typeColors[typ] = customColorMap[typ];
+                    } else {
+                        const t = (val - cmin) / range;
+                        typeColors[typ] = this._interpolateColorscale(colorscale, t);
+                    }
+                }
+                for (const bid of allBids) {
+                    const typ = this.data.bidTypeMap[bid];
+                    mode.colors[bid] = typeColors[typ] || 'rgb(128,128,128)';
+                }
+                mode.type_colors = typeColors;
+            }
+            // Pre-compute type_values and _sortedValues for scalar percentile filtering + colorbar
+            if (!isInstanceLevel) {
+                mode.type_values = {};
+                for (const [typ, val] of Object.entries(numMap)) mode.type_values[typ] = val;
+            }
+            mode._sortedValues = Object.values(numMap).sort((a, b) => a - b);
+        } else {
+            // ── Categorical mode ──
+            mode.is_categorical = true;
+            const uniqueVals = [...new Set(values)];
+            const catColors = {};
+            if (customColorMap) {
+                // Build category→color from value→color: map each value to its row's custom color
+                const valToColor = {};
+                for (const [key, val] of Object.entries(valueMap)) {
+                    if (customColorMap[key] && !valToColor[val]) valToColor[val] = customColorMap[key];
+                }
+                for (const v of uniqueVals) {
+                    catColors[v] = valToColor[v] || 'rgb(128,128,128)';
+                }
+            } else {
+                for (let i = 0; i < uniqueVals.length; i++) {
+                    const hue = uniqueVals.length <= 1 ? 0 : i / uniqueVals.length;
+                    const c = new THREE.Color().setHSL(hue, 0.7, 0.55);
+                    catColors[uniqueVals[i]] = `rgb(${Math.round(c.r*255)},${Math.round(c.g*255)},${Math.round(c.b*255)})`;
+                }
+            }
+            if (isInstanceLevel) {
+                const typeFirstColor = {};
+                for (const bid of allBids) {
+                    const cat = valueMap[bid];
+                    mode.colors[bid] = cat != null ? (catColors[cat] || 'rgb(128,128,128)') : 'rgb(128,128,128)';
+                    const typ = this.data.bidTypeMap[bid];
+                    if (typ && !typeFirstColor[typ]) typeFirstColor[typ] = mode.colors[bid];
+                }
+                mode.type_colors = typeFirstColor;
+            } else {
+                const typeColors = {};
+                for (const [typ, cat] of Object.entries(valueMap)) {
+                    typeColors[typ] = catColors[cat] || 'rgb(128,128,128)';
+                }
+                for (const bid of allBids) {
+                    const typ = this.data.bidTypeMap[bid];
+                    mode.colors[bid] = typeColors[typ] || 'rgb(128,128,128)';
+                }
+                mode.type_colors = typeColors;
+            }
+            // Store category→color mapping for legend display
+            mode._catLegend = catColors;
+        }
+        return mode;
+    }
+
+    _handleColorCSVUpload(text, filename) {
+        const parsed = this._parseCSV(text);
+        if (!parsed || parsed.rows.length === 0) {
+            alert('Could not parse CSV or no data rows found.');
+            return;
+        }
+        const firstCol = parsed.headers[0].toLowerCase().trim();
+        let isInstanceLevel = false;
+        if (firstCol === 'bodyid' || firstCol === 'body_id') {
+            isInstanceLevel = true;
+        } else if (firstCol !== 'type') {
+            alert('First column must be "type" or "bodyid" / "body_id". Found: "' + parsed.headers[0] + '"');
+            return;
+        }
+
+        const newModes = [];
+        for (let col = 1; col < parsed.headers.length; col++) {
+            const colName = parsed.headers[col].trim();
+            const valueMap = {};
+            for (const row of parsed.rows) {
+                const key = row[0].trim();
+                const val = row[col] != null ? row[col].trim() : '';
+                if (key && val !== '') valueMap[key] = val;
+            }
+            if (Object.keys(valueMap).length === 0) continue;
+
+            // Check if next column is a paired color column (all valid CSS colors)
+            let customColorMap = null;
+            if (col + 1 < parsed.headers.length) {
+                const nextColVals = {};
+                let allColors = true;
+                for (const row of parsed.rows) {
+                    const key = row[0].trim();
+                    const cv = row[col + 1] != null ? row[col + 1].trim() : '';
+                    if (key && cv !== '') {
+                        if (!this._isValidCSSColor(cv)) { allColors = false; break; }
+                        nextColVals[key] = cv;
+                    }
+                }
+                if (allColors && Object.keys(nextColVals).length > 0) {
+                    customColorMap = nextColVals;
+                    col++;  // skip the color column
+                }
+            }
+
+            // Check for duplicate name — append suffix if needed
+            let modeName = colName;
+            let suffix = 2;
+            while (this.data.colorModes.find(m => m.name === modeName)) {
+                modeName = `${colName} (${suffix++})`;
+            }
+
+            const mode = this._createUploadedColorMode(modeName, firstCol, valueMap, isInstanceLevel, customColorMap);
+            // Insert before Custom (always last)
+            const insertIdx = this.data.colorModes.length - 1;
+            this.data.colorModes.splice(insertIdx, 0, mode);
+            this._addColorModeButton(mode, insertIdx, this._colorSection,
+                'width:32px;height:32px;border:1px solid #555;border-radius:3px;cursor:pointer;background:#222;color:#fff;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;padding:0;font-size:15px;box-sizing:border-box;');
+            newModes.push(mode);
+        }
+
+        if (newModes.length === 0) {
+            alert('No valid data columns found in CSV.');
+            return;
+        }
+
+        this._reindexColorButtons();
+
+        // Auto-switch to the first new mode
+        const firstIdx = this.data.colorModes.findIndex(m => m.name === newModes[0].name);
+        if (firstIdx >= 0) {
+            this.vis.switchColorMode(firstIdx);
+            this.vis._applyAllVisibility();
+            this._colorSection.querySelectorAll('button[data-colormode]').forEach(b => {
+                b.style.background = '#222'; b.style.color = '#fff';
+            });
+            const activeBtn = this._colorSection.querySelector(`button[data-colormodename="${newModes[0].name}"]`);
+            if (activeBtn) { activeBtn.style.background = 'rgb(212,160,23)'; activeBtn.style.color = '#000'; }
+            this._updateColorbar(newModes[0]);
+            this._updatePanelSwatches();
+            this.syncAllState();
+        }
+        this._updateInstanceBtnState();
+
+        // Save uploaded CSV text for session persistence
+        if (!this._uploadedColorCSVs) this._uploadedColorCSVs = [];
+        this._uploadedColorCSVs.push({ filename, text });
+
+        // Trigger session save
+        if (this.viewer.session) this.viewer.session.debouncedSave();
+    }
+
+    _isValidCSSColor(str) {
+        if (!str || typeof str !== 'string') return false;
+        if (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(str)) return true;
+        if (/^rgb\(/.test(str)) return true;
+        // Check named colors via canvas
+        const ctx = document.createElement('canvas').getContext('2d');
+        ctx.fillStyle = '#000000';
+        ctx.fillStyle = str;
+        return ctx.fillStyle !== '#000000' || str.toLowerCase() === 'black';
+    }
+
+    async _handleSynapseCSVUpload(text, filename, isRestore) {
+        const synMgr = this.viewer.synapse;
+        if (!synMgr) {
+            if (!isRestore) alert('Synapse manager not available.');
+            return;
+        }
+        // Auto-load synapse data if not yet loaded
+        if (!synMgr.loaded) {
+            if (!DATA.synapseData) {
+                if (!isRestore) alert('No synapse data is embedded in this visualization. Generate the HTML with synapse data enabled.');
+                return;
+            }
+            const ok = await synMgr.loadData();
+            if (!ok || !synMgr.data) {
+                if (!isRestore) alert('Failed to load synapse data.');
+                return;
+            }
+        }
+
+        const parsed = this._parseCSV(text);
+        if (!parsed || parsed.rows.length === 0) {
+            if (!isRestore) alert('Could not parse CSV or no data rows found.');
+            return;
+        }
+
+        // Validate headers: need bodyid_pre, bodyid_post, and a 3rd column
+        const h = parsed.headers.map(s => s.toLowerCase().trim());
+        const preCol = h.indexOf('bodyid_pre');
+        const postCol = h.indexOf('bodyid_post');
+        if (preCol < 0 || postCol < 0 || parsed.headers.length < 3) {
+            if (!isRestore) alert('Synapse CSV must have columns: bodyid_pre, bodyid_post, and a 3rd column (color or category).');
+            return;
+        }
+        // Find the 3rd column (first that isn't pre or post) and optional 4th color column
+        let valCol = -1, colorCol = -1;
+        for (let i = 0; i < parsed.headers.length; i++) {
+            if (i !== preCol && i !== postCol) {
+                if (valCol < 0) valCol = i;
+                else if (colorCol < 0) colorCol = i;
+            }
+        }
+        if (valCol < 0) return;
+
+        // Check if colorCol contains all valid CSS colors (paired category+color format)
+        let pairedColorMap = null;
+        if (colorCol >= 0) {
+            let allColors = true;
+            const catToColor = {};
+            for (const row of parsed.rows) {
+                const cv = row[colorCol] ? row[colorCol].trim() : '';
+                const cat = row[valCol] ? row[valCol].trim() : '';
+                if (cv && cat) {
+                    if (!this._isValidCSSColor(cv)) { allColors = false; break; }
+                    if (!catToColor[cat]) catToColor[cat] = cv;
+                }
+            }
+            if (allColors && Object.keys(catToColor).length > 0) {
+                pairedColorMap = catToColor;  // {categoryValue: cssColor}
+            }
+        }
+
+        // Gather data: Map<"preBid|postBid", value>
+        const pairValues = new Map();
+        for (const row of parsed.rows) {
+            const pre = row[preCol].trim();
+            const post = row[postCol].trim();
+            const val = row[valCol] ? row[valCol].trim() : '';
+            if (pre && post && val) pairValues.set(`${pre}|${post}`, val);
+        }
+
+        // Auto-detect: are all values valid CSS colors? (3-column format: pre, post, color)
+        const allVals = [...pairValues.values()];
+        const isDirectColor = !pairedColorMap && allVals.every(v => this._isValidCSSColor(v));
+
+        // Group by color/category
+        const groups = new Map(); // value -> [pairKeys]
+        for (const [key, val] of pairValues) {
+            if (!groups.has(val)) groups.set(val, []);
+            groups.get(val).push(key);
+        }
+
+        // Assign colors for category mode
+        let catColors = null;
+        if (pairedColorMap) {
+            catColors = pairedColorMap;  // use user-provided colors
+        } else if (!isDirectColor) {
+            catColors = {};
+            const cats = [...groups.keys()];
+            for (let i = 0; i < cats.length; i++) {
+                const hue = cats.length <= 1 ? 0 : i / cats.length;
+                const c = new THREE.Color().setHSL(hue, 0.7, 0.55);
+                catColors[cats[i]] = `#${c.getHexString()}`;
+            }
+        }
+
+        // Create synapse groups
+        let created = 0;
+        for (const [val, pairKeys] of groups) {
+            const allIndices = [];
+            for (const pk of pairKeys) {
+                const idxArr = synMgr.data.pairIndex.get(pk);
+                if (idxArr) allIndices.push(...idxArr);
+            }
+            if (allIndices.length === 0) continue;
+
+            const color = isDirectColor ? val : catColors[val];
+            const label = isDirectColor ? `CSV: ${val}` : `CSV: ${val}`;
+            synMgr.createGroupFromIndices(allIndices, {
+                label: label,
+                color: color,
+                synapseType: 'both',
+            });
+            created++;
+        }
+
+        if (created > 0) {
+            this._updateSynapsePanel();
+            // Make synapse panel visible
+            if (this.synPanel) this.synPanel.style.display = 'flex';
+
+            // Store for session persistence
+            if (!isRestore) {
+                if (!synMgr._uploadedCSVs) synMgr._uploadedCSVs = [];
+                synMgr._uploadedCSVs.push({ filename, text });
+                if (this.viewer.session) this.viewer.session.debouncedSave();
+            }
+        } else if (!isRestore) {
+            alert('No matching synapse pairs found in the loaded data. Check that the body IDs in your CSV match neurons in this visualization.');
+        }
     }
 
     _buildMagnifier() {
@@ -6193,8 +7069,79 @@ class UIManager {
         addItem('Default', null);
         for (const name of Object.keys(COLORMAPS)) addItem(name, name);
 
+        // "Remove" option for uploaded color modes
+        if (mode.is_uploaded) {
+            const sep = document.createElement('div');
+            sep.style.cssText = 'border-top:1px solid #444;margin:4px 0;';
+            itemList.appendChild(sep);
+            const removeItem = document.createElement('div');
+            removeItem.style.cssText = 'padding:5px 14px;color:#e55;cursor:pointer;display:flex;align-items:center;gap:8px;';
+            removeItem.innerHTML = '<span style="font-size:13px;">\u2715</span><span>Remove color mode</span>';
+            removeItem.onmouseenter = () => { removeItem.style.background = 'rgba(255,80,80,0.15)'; };
+            removeItem.onmouseleave = () => { removeItem.style.background = ''; };
+            removeItem.onclick = () => {
+                menu.remove();
+                document.removeEventListener('mousedown', dismiss, true);
+                this._removeUploadedColorMode(modeIdx);
+            };
+            itemList.appendChild(removeItem);
+        }
+
         document.body.appendChild(menu);
         document.addEventListener('mousedown', dismiss, true);
+    }
+
+    _removeUploadedColorMode(modeIdx) {
+        const mode = this.data.colorModes[modeIdx];
+        if (!mode) return;
+        const modeName = mode.name;
+
+        // If this is the active mode, switch to Cell Type first
+        if (this.vis.activeColorMode === modeIdx) {
+            this.vis.switchColorMode(0);
+            this.vis._applyAllVisibility();
+            this._colorSection.querySelectorAll('button[data-colormode]').forEach(b => {
+                b.style.background = '#222'; b.style.color = '#fff';
+            });
+            const cellTypeBtn = this._colorSection.querySelector('button[data-colormode="0"]');
+            if (cellTypeBtn) { cellTypeBtn.style.background = 'rgb(212,160,23)'; cellTypeBtn.style.color = '#000'; }
+            this._updateColorbar(this.data.colorModes[0]);
+            this._updatePanelSwatches();
+        }
+
+        // Remove from colorModes array
+        this.data.colorModes.splice(modeIdx, 1);
+
+        // Remove button from DOM
+        const btn = this._colorSection.querySelector(`button[data-colormodename="${modeName}"]`);
+        if (btn) btn.remove();
+
+        // Remove from _instanceLevelBtns
+        if (this._instanceLevelBtns) {
+            this._instanceLevelBtns = this._instanceLevelBtns.filter(b => b.dataset.colormodename !== modeName);
+        }
+
+        // Re-index remaining buttons
+        this._reindexColorButtons();
+
+        // If active mode index shifted, update
+        if (this.vis.activeColorMode >= this.data.colorModes.length) {
+            this.vis.activeColorMode = 0;
+        }
+
+        // Remove from uploadedColorCSVs by matching mode name
+        if (this._uploadedColorCSVs) {
+            // The CSV may have produced multiple modes; remove entries whose columns match
+            this._uploadedColorCSVs = this._uploadedColorCSVs.filter(entry => {
+                const p = this._parseCSV(entry.text);
+                if (!p) return true;
+                return !p.headers.slice(1).some(h => h.trim() === modeName || h.trim().replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) === modeName);
+            });
+        }
+
+        this._updateInstanceBtnState();
+        this.syncAllState();
+        if (this.viewer.session) this.viewer.session.debouncedSave();
     }
 
     _applyColormap(modeIdx, cmapName) {
@@ -6349,12 +7296,9 @@ class UIManager {
         addRows(downstream, 'Downstream');
 
         const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
-        const url  = URL.createObjectURL(blob);
-        const a    = document.createElement('a');
-        a.href     = url;
-        a.download = `${term}_${label}_connections.csv`;
-        a.click();
-        URL.revokeObjectURL(url);
+        _saveFileAs(blob, `${term}_${label}_connections.csv`, [
+            { description: 'CSV File', accept: { 'text/csv': ['.csv'] } }
+        ]);
     }
 
     _buildSidebar() {
@@ -6638,26 +7582,132 @@ class UIManager {
 
             typeStickyHdr.appendChild(meshToggleWrap);
 
+            // Neuron size slider (skeleton line width) — only visible in skeleton mode
+            const sizeWrap = document.createElement('div');
+            sizeWrap.style.cssText = 'margin-bottom:10px;display:flex;align-items:center;gap:6px;';
+            const sizeLabel = document.createElement('span');
+            sizeLabel.textContent = 'Neuron size:';
+            sizeLabel.style.cssText = 'font-size:14px;font-weight:bold;color:#aaa;white-space:nowrap;';
+            sizeWrap.appendChild(sizeLabel);
+            const sizeSlider = document.createElement('input');
+            sizeSlider.type = 'range';
+            sizeSlider.min = '0.1';
+            sizeSlider.max = '10';
+            sizeSlider.step = '0.1';
+            sizeSlider.value = String(this.data.initialLineWidth);
+            sizeSlider.style.cssText = 'flex:1;min-width:0;max-width:100px;accent-color:rgb(212,160,23);';
+            sizeWrap.appendChild(sizeSlider);
+            const sizeVal = document.createElement('span');
+            sizeVal.textContent = String(this.data.initialLineWidth);
+            sizeVal.style.cssText = 'font-size:12px;color:#ccc;width:24px;';
+            sizeSlider.oninput = () => {
+                sizeVal.textContent = sizeSlider.value;
+                _globalLineWidth.value = parseFloat(sizeSlider.value);
+            };
+            sizeWrap.appendChild(sizeVal);
+            typeStickyHdr.appendChild(sizeWrap);
+            this._neuronSizeWrap = sizeWrap;
+
+            // Somata visibility toggle (skeleton-only when meshes available)
+            const somataWrap = document.createElement('div');
+            somataWrap.style.cssText = 'margin-bottom:10px;display:flex;align-items:center;gap:6px;';
+            const somataCheck = document.createElement('input');
+            somataCheck.type = 'checkbox';
+            somataCheck.checked = true;
+            somataCheck.style.cssText = 'margin:0;cursor:pointer;accent-color:rgb(212,160,23);';
+            somataWrap.appendChild(somataCheck);
+            const somataLabel = document.createElement('span');
+            somataLabel.textContent = 'Show somata';
+            somataLabel.style.cssText = 'font-size:14px;font-weight:bold;color:#aaa;cursor:pointer;';
+            somataLabel.onclick = () => { somataCheck.click(); };
+            somataWrap.appendChild(somataLabel);
+            somataCheck.onchange = () => {
+                this.vis._somataVisible = somataCheck.checked;
+                this.vis._applyAllVisibility();
+            };
+            typeStickyHdr.appendChild(somataWrap);
+
+            // Hook into mesh/skeleton toggle to show/hide skeleton-only controls
+            const origSwitch = switchMeshMode;
+            const wrappedSwitch = (toMesh) => {
+                origSwitch(toMesh);
+                sizeWrap.style.display = toMesh ? 'none' : 'flex';
+                somataWrap.style.display = toMesh ? 'none' : 'flex';
+            };
+            this._switchMeshMode = wrappedSwitch;
+            meshToggleSwitch.onclick = () => wrappedSwitch(!this.vis._meshesVisible);
+            skelLabel.onclick = () => wrappedSwitch(false);
+            meshLabel.onclick = () => wrappedSwitch(true);
+            // Initial visibility: if mesh mode is default, hide skeleton-only controls
+            if (this.vis._meshesVisible !== false) {
+                sizeWrap.style.display = 'none';
+                somataWrap.style.display = 'none';
+            }
+
         }
 
-        // Somata visibility toggle
-        const somataWrap = document.createElement('div');
-        somataWrap.style.cssText = 'margin-bottom:10px;display:flex;align-items:center;gap:6px;';
-        const somataCheck = document.createElement('input');
-        somataCheck.type = 'checkbox';
-        somataCheck.checked = true;
-        somataCheck.style.cssText = 'margin:0;cursor:pointer;accent-color:rgb(212,160,23);';
-        somataWrap.appendChild(somataCheck);
-        const somataLabel = document.createElement('span');
-        somataLabel.textContent = 'Show somata';
-        somataLabel.style.cssText = 'font-size:14px;font-weight:bold;color:#aaa;cursor:pointer;';
-        somataLabel.onclick = () => { somataCheck.click(); };
-        somataWrap.appendChild(somataLabel);
-        somataCheck.onchange = () => {
-            this.vis._somataVisible = somataCheck.checked;
-            this.vis._applyAllVisibility();
+        // Neuron size + Somata — shown always when no mesh data (skeleton-only visualization)
+        if (!this.viewer.scene._meshesAvailable) {
+            const sizeWrap = document.createElement('div');
+            sizeWrap.style.cssText = 'margin-bottom:10px;display:flex;align-items:center;gap:6px;';
+            const sizeLabel = document.createElement('span');
+            sizeLabel.textContent = 'Neuron size:';
+            sizeLabel.style.cssText = 'font-size:14px;font-weight:bold;color:#aaa;white-space:nowrap;';
+            sizeWrap.appendChild(sizeLabel);
+            const sizeSlider = document.createElement('input');
+            sizeSlider.type = 'range';
+            sizeSlider.min = '0.1';
+            sizeSlider.max = '10';
+            sizeSlider.step = '0.1';
+            sizeSlider.value = String(this.data.initialLineWidth);
+            sizeSlider.style.cssText = 'flex:1;min-width:0;max-width:100px;accent-color:rgb(212,160,23);';
+            sizeWrap.appendChild(sizeSlider);
+            const sizeVal = document.createElement('span');
+            sizeVal.textContent = String(this.data.initialLineWidth);
+            sizeVal.style.cssText = 'font-size:12px;color:#ccc;width:24px;';
+            sizeSlider.oninput = () => {
+                sizeVal.textContent = sizeSlider.value;
+                _globalLineWidth.value = parseFloat(sizeSlider.value);
+            };
+            sizeWrap.appendChild(sizeVal);
+            typeStickyHdr.appendChild(sizeWrap);
+
+            const somataWrap = document.createElement('div');
+            somataWrap.style.cssText = 'margin-bottom:10px;display:flex;align-items:center;gap:6px;';
+            const somataCheck = document.createElement('input');
+            somataCheck.type = 'checkbox';
+            somataCheck.checked = true;
+            somataCheck.style.cssText = 'margin:0;cursor:pointer;accent-color:rgb(212,160,23);';
+            somataWrap.appendChild(somataCheck);
+            const somataLabel = document.createElement('span');
+            somataLabel.textContent = 'Show somata';
+            somataLabel.style.cssText = 'font-size:14px;font-weight:bold;color:#aaa;cursor:pointer;';
+            somataLabel.onclick = () => { somataCheck.click(); };
+            somataWrap.appendChild(somataLabel);
+            somataCheck.onchange = () => {
+                this.vis._somataVisible = somataCheck.checked;
+                this.vis._applyAllVisibility();
+            };
+            typeStickyHdr.appendChild(somataWrap);
+        }
+
+        // Preview on hover toggle (always visible)
+        const hoverWrap = document.createElement('div');
+        hoverWrap.style.cssText = 'margin-bottom:10px;display:flex;align-items:center;gap:6px;';
+        const hoverCheck = document.createElement('input');
+        hoverCheck.type = 'checkbox';
+        hoverCheck.checked = false;
+        hoverCheck.style.cssText = 'margin:0;cursor:pointer;accent-color:rgb(212,160,23);';
+        hoverWrap.appendChild(hoverCheck);
+        const hoverLabel = document.createElement('span');
+        hoverLabel.textContent = 'Preview on hover';
+        hoverLabel.style.cssText = 'font-size:14px;font-weight:bold;color:#aaa;cursor:pointer;';
+        hoverLabel.onclick = () => { hoverCheck.click(); };
+        hoverWrap.appendChild(hoverLabel);
+        hoverCheck.onchange = () => {
+            this.viewer.hoverPreviewEnabled = hoverCheck.checked;
         };
-        typeStickyHdr.appendChild(somataWrap);
+        typeStickyHdr.appendChild(hoverWrap);
 
         // Types (N) header
         this.panelHeader = document.createElement('div');
@@ -6722,10 +7772,10 @@ class UIManager {
 
             this.hlModeByNeuron = toNeuron;
 
-            // Auto-switch away from Instance mode when going back to type mode
+            // Auto-switch away from Instance / instance-level modes when going back to type mode
             if (!toNeuron) {
                 const curMode = this.data.colorModes[this.vis.activeColorMode];
-                if (curMode && curMode.name === 'Instance') {
+                if (curMode && (curMode.name === 'Instance' || curMode.is_instance_level || curMode.nt_legend)) {
                     // Switch to Cell Type (index 0)
                     this.vis.switchColorMode(0);
                     const topBar = this.topBar;
@@ -6898,18 +7948,19 @@ class UIManager {
     }
 
     _updateInstanceBtnState() {
-        // Gray out Instance color button when not in neuron mode
-        const btn = this._instanceBtn;
-        if (!btn) return;
+        // Gray out Instance and instance-level color buttons when not in neuron mode
         const isNeuronMode = this.hlModeByNeuron;
-        const isActive = this.vis.activeColorMode ===
-            this.data.colorModes.findIndex(m => m.name === 'Instance');
-        if (!isNeuronMode && !isActive) {
-            btn.style.opacity = '0.35';
-            btn.style.pointerEvents = 'none';
-        } else {
-            btn.style.opacity = '1';
-            btn.style.pointerEvents = 'auto';
+        for (const btn of (this._instanceLevelBtns || [])) {
+            const modeName = btn.dataset.colormodename;
+            const mIdx = this.data.colorModes.findIndex(m => m.name === modeName);
+            const isActive = this.vis.activeColorMode === mIdx;
+            if (!isNeuronMode && !isActive) {
+                btn.style.opacity = '0.35';
+                btn.style.pointerEvents = 'none';
+            } else {
+                btn.style.opacity = '1';
+                btn.style.pointerEvents = 'auto';
+            }
         }
     }
 
@@ -7355,12 +8406,12 @@ class UIManager {
         // ── Standard Views ──────────────────────────────────────────
         const V = (x, y, z) => new THREE.Vector3(x, y, z);
         addSubmenu('Standard Views', [
-            { label: 'Anterior',  action: () => this._snapToView(V( 0, 0,-1), V(0,-1, 0)) },
-            { label: 'Posterior', action: () => this._snapToView(V( 0, 0, 1), V(0,-1, 0)) },
-            { label: 'Dorsal',    action: () => this._snapToView(V( 0,-1, 0), V(0, 0,-1)) },
-            { label: 'Ventral',   action: () => this._snapToView(V( 0, 1, 0), V(0, 0,-1)) },
-            { label: 'Left',      action: () => this._snapToView(V( 1, 0, 0), V(0,-1, 0)) },
-            { label: 'Right',     action: () => this._snapToView(V(-1, 0, 0), V(0,-1, 0)) },
+            { label: (DATA.axisLabels || {}).zNeg || 'Anterior',  action: () => this._snapToView(V( 0, 0,-1), V(0,-1, 0)) },
+            { label: (DATA.axisLabels || {}).zPos || 'Posterior', action: () => this._snapToView(V( 0, 0, 1), V(0,-1, 0)) },
+            { label: (DATA.axisLabels || {}).yNeg || 'Dorsal',    action: () => this._snapToView(V( 0,-1, 0), V(0, 0,-1)) },
+            { label: (DATA.axisLabels || {}).yPos || 'Ventral',   action: () => this._snapToView(V( 0, 1, 0), V(0, 0,-1)) },
+            { label: (DATA.axisLabels || {}).xPos || 'Left',      action: () => this._snapToView(V( 1, 0, 0), V(0,-1, 0)) },
+            { label: (DATA.axisLabels || {}).xNeg || 'Right',     action: () => this._snapToView(V(-1, 0, 0), V(0,-1, 0)) },
         ]);
 
         // ── Invert ──────────────────────────────────────────────────
@@ -7740,17 +8791,15 @@ class UIManager {
         const back  = [e[8], e[9], e[10]];
         function dot(a, b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
 
-        // Anatomical axis definitions
-        //   +X = brain Left,  -X = brain Right  (mirrored: head-on view)
-        //   +Y = Ventral,     -Y = Dorsal  (data Y increases ventrally)
-        //   -Z = Anterior (toward viewer at default), +Z = Posterior
+        // Anatomical axis definitions — read from DATA if available, else use Drosophila defaults
+        const al = (DATA.axisLabels || {});
         const axes = [
-            { d: [ 1, 0, 0], label: 'Left',      color: '#b05848' },
-            { d: [-1, 0, 0], label: 'Right',     color: '#b05848' },
-            { d: [ 0, 1, 0], label: 'Ventral',   color: '#5a9660' },
-            { d: [ 0,-1, 0], label: 'Dorsal',    color: '#5a9660' },
-            { d: [ 0, 0,-1], label: 'Anterior',  color: '#4d6eaa' },
-            { d: [ 0, 0, 1], label: 'Posterior', color: '#4d6eaa' },
+            { d: [ 1, 0, 0], label: al.xPos || 'Left',      color: '#b05848' },
+            { d: [-1, 0, 0], label: al.xNeg || 'Right',     color: '#b05848' },
+            { d: [ 0, 1, 0], label: al.yPos || 'Ventral',   color: '#5a9660' },
+            { d: [ 0,-1, 0], label: al.yNeg || 'Dorsal',    color: '#5a9660' },
+            { d: [ 0, 0,-1], label: al.zNeg || 'Anterior',  color: '#4d6eaa' },
+            { d: [ 0, 0, 1], label: al.zPos || 'Posterior', color: '#4d6eaa' },
         ];
 
         // Project each world axis into screen space via camera basis
@@ -8151,15 +9200,34 @@ class UIManager {
             return;
         }
 
-        // Non-scalar, non-NT mode (e.g. Cell Type) — colorbar always suppressed;
-        // the type panel already communicates per-category colours.
+        // Non-scalar, non-NT mode — show categorical legend if available
         if (!mode.is_scalar) {
+            if (mode._catLegend && Object.keys(mode._catLegend).length > 0) {
+                // Show categorical legend using NT legend container
+                while (this._ntLegend.children.length > 1) this._ntLegend.removeChild(this._ntLegend.lastChild);
+                this._ntLegendTitle.textContent = mode.name || mode.label || 'Legend';
+                this._ntLegendRows = {};
+                for (const [cat, color] of Object.entries(mode._catLegend)) {
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:3px;cursor:default;';
+                    const swatch = document.createElement('div');
+                    swatch.style.cssText = `width:12px;height:12px;border-radius:2px;background:${color};flex-shrink:0;`;
+                    row.appendChild(swatch);
+                    const label = document.createElement('div');
+                    label.style.cssText = 'font-size:11px;color:#ccc;';
+                    label.textContent = cat;
+                    row.appendChild(label);
+                    this._ntLegend.appendChild(row);
+                    this._ntLegendRows[cat] = { row, swatch, label, color };
+                }
+                this._ntLegend.style.display = 'block';
+            }
             this._updateFilterPanelForMode(mode);
             return;
         }
 
-        // Scalar mode with no filterable numeric data — also suppress.
-        if (!mode.type_values) {
+        // Scalar mode with no filterable numeric data — show colorbar if has colorscale
+        if (!mode.type_values && !mode._sortedValues) {
             this._updateFilterPanelForMode(mode);
             return;
         }
@@ -8680,7 +9748,7 @@ class UIManager {
         const SYN_PANEL_W = 280;
         const connW = 500;
         const panel = document.createElement('div');
-        panel.style.cssText = `position:fixed;bottom:${PANEL_PAD}px;right:${TYPE_PANEL_W + PANEL_PAD + connW + 4}px;width:${SYN_PANEL_W}px;height:${CONN_PANEL_H};background:rgba(20,20,20,0.92);color:#ccc;z-index:998;display:none;flex-direction:column;font-family:monospace;font-size:11px;border:1px solid #444;border-radius:6px;box-sizing:border-box;user-select:none;`;
+        panel.style.cssText = `position:fixed;bottom:${PANEL_PAD}px;right:${TYPE_PANEL_W + PANEL_PAD + connW + 4}px;width:${SYN_PANEL_W}px;height:${CONN_PANEL_H};background:rgba(20,20,20,0.92);color:#ccc;z-index:998;display:flex;flex-direction:column;font-family:monospace;font-size:11px;border:1px solid #444;border-radius:6px;box-sizing:border-box;user-select:none;`;
 
         // Title bar
         const titleBar = document.createElement('div');
@@ -8690,6 +9758,29 @@ class UIManager {
         titleText.textContent = 'Synapse Groups';
         titleText.style.cssText = 'font-weight:bold;font-size:11px;color:#fff;flex:1;';
         titleBar.appendChild(titleText);
+
+        // Synapse CSV upload button
+        const synUploadBtn = document.createElement('span');
+        synUploadBtn.textContent = '+';
+        synUploadBtn.dataset.tip = 'Upload synapse CSV';
+        synUploadBtn.style.cssText = 'font-size:14px;font-weight:bold;color:#aaa;cursor:pointer;padding:0 6px;';
+        synUploadBtn.onmouseenter = () => { synUploadBtn.style.color = '#fff'; };
+        synUploadBtn.onmouseleave = () => { synUploadBtn.style.color = '#aaa'; };
+        synUploadBtn.onclick = (e) => {
+            e.stopPropagation();
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.csv';
+            input.onchange = (ev) => {
+                const file = ev.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (re) => this._handleSynapseCSVUpload(re.target.result, file.name);
+                reader.readAsText(file);
+            };
+            input.click();
+        };
+        titleBar.appendChild(synUploadBtn);
 
         const collapseBtn = document.createElement('span');
         collapseBtn.textContent = '\u25BC';
@@ -8711,9 +9802,9 @@ class UIManager {
 
         const slider = document.createElement('input');
         slider.type = 'range';
-        slider.min = '0.5';
+        slider.min = '0.1';
         slider.max = '5';
-        slider.step = '0.1';
+        slider.step = '0.05';
         slider.value = '2';
         slider.style.cssText = 'flex:1;height:12px;cursor:pointer;accent-color:#d4a017;';
         slider.addEventListener('input', () => {
@@ -8746,10 +9837,15 @@ class UIManager {
 
     _updateSynapsePanel() {
         const groups = this.viewer.synapse.groups;
-        // Show/hide panel based on whether groups exist
-        this.synPanel.style.display = groups.length > 0 ? 'flex' : 'none';
 
         this.synGroupList.innerHTML = '';
+        if (groups.length === 0) {
+            const empty = document.createElement('div');
+            empty.textContent = 'No synapse groups. Click + to upload a CSV.';
+            empty.style.cssText = 'padding:12px 10px;color:#666;font-size:10px;text-align:center;';
+            this.synGroupList.appendChild(empty);
+            return;
+        }
         for (const g of groups) {
             const row = document.createElement('div');
             row.style.cssText = 'display:flex;align-items:center;gap:4px;padding:3px 8px;font-size:10px;';
@@ -9697,13 +10793,10 @@ class UIManager {
             }
 
             const blob = new Blob(chunks, { type: mimeType });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
             const term = this.viewer.data.regexTerm || 'neuron';
-            a.download = `${term}_rotation.${fileExt}`;
-            a.click();
-            URL.revokeObjectURL(url);
+            _saveFileAs(blob, `${term}_rotation.${fileExt}`, [
+                { description: 'Video', accept: { [mimeType]: [`.${fileExt}`] } }
+            ]);
         };
 
         scene._recordingActive = true;
@@ -9935,13 +11028,10 @@ class UIManager {
         overlay.remove();
 
         const blob = new Blob([buf], { type: 'video/avi' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
         const term = this.viewer.data.regexTerm || 'neuron';
-        a.download = `${term}_rotation.avi`;
-        a.click();
-        URL.revokeObjectURL(url);
+        _saveFileAs(blob, `${term}_rotation.avi`, [
+            { description: 'AVI Video', accept: { 'video/avi': ['.avi'] } }
+        ]);
     }
 
     _recordRotationGif(axis, degPerSec, resolution, orbitCenter, totalDeg, pivotAngle) {
@@ -10212,13 +11302,10 @@ class UIManager {
 
         // Download
         const blob = new Blob([new Uint8Array(out)], { type: 'image/gif' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
         const term = this.viewer.data.regexTerm || 'neuron';
-        a.download = `${term}_rotation.gif`;
-        a.click();
-        URL.revokeObjectURL(url);
+        _saveFileAs(blob, `${term}_rotation.gif`, [
+            { description: 'GIF Image', accept: { 'image/gif': ['.gif'] } }
+        ]);
     }
 
     _buildInstructionsButton() {
@@ -10267,31 +11354,62 @@ class UIManager {
         body.appendChild(content);
         content.innerHTML = `
             <h3 style="color:#d4a017;font-size:14px;">⬡ Orientation Gizmo</h3>
-            <p style="border:1px solid #444;border-radius:5px;padding:8px;background:rgba(255,255,255,0.04);">The lower-left widget shows a whole-brain reference with anatomical axes (D/V, L/R, A/P). The <b>gray box</b> tracks your zoom/pan position. When Z-section is active, an <b>orange/blue ellipse</b> shows the clipping plane.</p>
+            <p style="border:1px solid #444;border-radius:5px;padding:8px;background:rgba(255,255,255,0.04);">The lower-left widget shows a whole-brain reference with anatomical axes (D/V, L/R, A/P). The <b>gray box</b> tracks your zoom/pan position. When Z-section is active, an <b>orange/blue ellipse</b> shows the clipping plane. Right-click the gizmo for snap-to-view and axis inversion options.</p>
 
             <h3 style="color:#d4a017;font-size:14px;">3D View — Navigation</h3>
-            <p><b>Orbit:</b> Left-drag anywhere in the 3D canvas. <b>Pan:</b> Right-drag or Ctrl+drag. <b>Zoom:</b> Scroll wheel. Rotation stops immediately on mouse release (no drift). Full rotation is available in all directions — Dorsal, Ventral, Anterior, and Posterior are all reachable.</p>
+            <p><b>Orbit:</b> Left-drag anywhere in the 3D canvas. <b>Pan:</b> Right-drag or Ctrl+drag. <b>Zoom:</b> Scroll wheel. Rotation stops immediately on mouse release (no drift). Full rotation is available in all directions.</p>
 
             <h3 style="color:#d4a017;font-size:14px;">3D View — Interaction</h3>
-            <p><b>Hover</b> over a neuron to see its type and ROI in the info box. <b>Double-click</b> a neuron to highlight/unhighlight its type. <b>Right-double-click</b> to toggle the hovered ROI on/off. <b>Preview on hover</b> (toggle in top bar) shows individual neuron skeletons on hover.</p>
+            <p><b>Hover</b> over a neuron to see its type and ROI in the info box. <b>Double-click</b> a neuron to highlight/unhighlight its type. <b>Right-double-click</b> to toggle the hovered ROI on/off.</p>
 
-            <h3 style="color:#d4a017;font-size:14px;">Top Bar Controls</h3>
-            <p><b>Show ROI Bounds:</b> Toggle transparent neuropil mesh overlays. <b>Color by:</b> Switch between cell-type colors, predicted neurotransmitter, and other scalar modes — neurons not represented in a color mode are dimmed in the sidebar. <b>Neuron size:</b> Adjusts skeleton line width. <b>Z-section:</b> Slice the volume at a given depth. <b>Preview on hover:</b> Show individual neuron skeletons while hovering. <b>Camera/Reset/Screenshot</b> buttons in the top-right.</p>
+            <h3 style="color:#d4a017;font-size:14px;">Top Bar — Color Modes</h3>
+            <p><b>Color by:</b> Switch between built-in modes (<em>Cell Type, Instance, Predicted NT, Custom</em>) and any uploaded CSV modes. <b>+</b> button uploads a new color CSV. <b>\u{1F500}</b> shuffles color assignments. <b>Right-click</b> a color mode button to change its colormap or remove an uploaded mode.</p>
+            <p><b>CSV format:</b> First column must be <code>type</code> (type-level) or <code>bodyid</code> (instance-level). Remaining columns become color modes. If a column immediately after a value column contains CSS colors (e.g. <code>#ff0000</code>), those colors are used as the default mapping. Instance-level modes are only active in Neuron mode.</p>
 
-            <h3 style="color:#d4a017;font-size:14px;">Type / Neuron Panel (right)</h3>
-            <p>Toggle between <b>Type</b> and <b>Neuron</b> mode with the switch at top-right. <b>Double-click</b> a row to highlight/unhighlight. <b>Single-click</b> a highlighted row to load it in the Connections panel. The <b>clip</b> checkbox clips each type/neuron to its ROI boundaries; <b>Clip all to ROI</b> applies to all highlighted neurons at once and persists when switching color modes.</p>
+            <h3 style="color:#d4a017;font-size:14px;">Top Bar — Controls</h3>
+            <p><b>Z-section:</b> Slice the volume at a given depth. <b>\u2725 Pan mode:</b> Swap left/right mouse button for pan vs orbit. <b>\u{1F50D} Magnifier:</b> GPU-based pixel picking for precise neuron identification. <b>\u21BA Reset camera.</b> <b>\u{1F4BE} Save session:</b> Export current state (highlights, camera, colors, synapse groups) as JSON. <b>\u{1F4C2} Load session:</b> Restore from a saved JSON file. <b>\u{1F4F7} Screenshot:</b> Save a PNG with camera position encoded in the filename. <b>\u{1F3AC} Video:</b> Record a rotation video (AVI, WebM, or GIF). All exports open a Save As dialog so you can choose the directory and filename.</p>
 
-            <h3 style="color:#d4a017;font-size:14px;">ROI Sidebar (left)</h3>
-            <p><b>Double-click</b> an ROI to toggle its visibility. <b>Single-click</b> to select it for the Connections panel. Synapse counts shown reflect only currently highlighted neurons. <b>Select all ROIs</b> checkbox at top.</p>
+            <h3 style="color:#d4a017;font-size:14px;">Right Sidebar — Type / Neuron Panel</h3>
+            <p>Toggle between <b>Type</b> and <b>Neuron</b> mode with the switch at top. <b>Mesh / Skeleton</b> toggle switches between 3D surface meshes and wire-frame skeletons (when meshes are available). In skeleton mode: <b>Neuron size</b> adjusts line width and <b>Show somata</b> toggles cell bodies. <b>Preview on hover</b> shows the full mesh or skeleton of a highlighted+clipped neuron when you hover over it.</p>
+            <p><b>Double-click</b> a row to highlight/unhighlight. <b>Single-click</b> a highlighted row to load it in the Connections panel. The <b>clip</b> checkbox clips each type/neuron to its ROI boundaries. <b>Saved Sets</b> let you store and recall highlight+clip configurations.</p>
+
+            <h3 style="color:#d4a017;font-size:14px;">Left Sidebar — ROIs</h3>
+            <p><b>Double-click</b> an ROI to toggle its visibility. <b>Single-click</b> to select it for the Connections panel. Synapse counts reflect only currently highlighted neurons. <b>Select all ROIs</b> checkbox at top. <b>Saved Sets</b> let you store ROI visibility configurations.</p>
 
             <h3 style="color:#d4a017;font-size:14px;">Connections Panel</h3>
-            <p>Shows upstream and downstream synaptic partners, broken down by ROI, for the selected type or neuron. <b>Double-click</b> an ROI header to toggle that ROI's visibility. Click a partner name to highlight it in the 3D view.</p>
+            <p>Shows upstream and downstream synaptic partners for the selected type or neuron, broken down by ROI. <b>Double-click</b> an ROI header to toggle visibility. Click a partner name to highlight it. <b>\u2193 CSV</b> exports the connection table. <b>Right-click</b> a partner row to show presynapses or postsynapses in the 3D view as colored spheres.</p>
+
+            <h3 style="color:#d4a017;font-size:14px;">Synapse Groups Panel</h3>
+            <p>Manage synapse visualization groups. Click <b>+</b> to upload a synapse CSV (<code>bodyid_pre, bodyid_post, category</code> columns; optional 4th color column). Groups appear as colored spheres with outlines. Use the <b>eye</b> toggle for visibility, <b>color swatch</b> to change colors, and <b>\u00D7</b> to remove. <b>Right-click</b> a group to split it by individual neuron. The <b>Size</b> slider adjusts sphere radius.</p>
+
+            <h3 style="color:#d4a017;font-size:14px;">Session Persistence</h3>
+            <p>Your viewing state (highlights, camera, color mode, synapse groups, uploaded CSVs) is automatically saved to browser localStorage and restored when you reopen the same HTML. Use <b>\u{1F4BE} Save</b> / <b>\u{1F4C2} Load</b> to export and share session files across browsers or machines.</p>
 
             <h3 style="color:#d4a017;font-size:14px;">Video Export</h3>
-            <p>Click the <b>video</b> button (\u{1F3AC}) in the top bar to record a 360° rotation. Choose the axis of rotation (Dorsal/Ventral, Left/Right, or Anterior/Posterior) and the rotation speed in degrees/second. The video duration is automatically set to complete a full 360° rotation.</p>
+            <p>Click <b>\u{1F3AC}</b> to record a rotation video. Choose motion type (360\u00B0 or pivot), axis of rotation, center point, and coordinate space. Available formats: <b>AVI</b> (MJPEG, universal), <b>WebM</b>, and <b>GIF</b>. Use Preview to test the animation before recording.</p>
+
+            <h3 style="color:#d4a017;font-size:14px;">CSV Upload Formats</h3>
+            <div style="border:1px solid #444;border-radius:5px;padding:10px;background:rgba(255,255,255,0.03);margin-bottom:10px;">
+                <p style="margin:0 0 6px 0;"><b>Color Mode CSV</b> (+ button in Color by bar):</p>
+                <p style="margin:0 0 4px 0;">First column: <code>type</code> (all neurons of a type share one color) or <code>bodyid</code> (each neuron gets its own color).</p>
+                <p style="margin:0 0 4px 0;">Remaining columns: numeric values (continuous colormap) or text categories (discrete colors).</p>
+                <p style="margin:0 0 4px 0;">Optional: a color column (CSS colors like <code>#ff0000</code>, <code>rgb(255,0,0)</code>, or <code>red</code>) immediately after a value column overrides the auto-generated colors.</p>
+                <pre style="background:#1a1a1a;padding:6px 8px;border-radius:3px;font-size:11px;color:#aaa;margin:6px 0 0 0;overflow-x:auto;">type,score,color        bodyid,cluster,color
+FB1A,0.85,#e41a1c       10539,alpha,#e41a1c
+FB1B,-0.32,#377eb8      11307,beta,#377eb8</pre>
+            </div>
+            <div style="border:1px solid #444;border-radius:5px;padding:10px;background:rgba(255,255,255,0.03);">
+                <p style="margin:0 0 6px 0;"><b>Synapse Group CSV</b> (+ button in Synapse Groups panel):</p>
+                <p style="margin:0 0 4px 0;">Required columns: <code>bodyid_pre</code>, <code>bodyid_post</code>, plus a category or color column.</p>
+                <p style="margin:0 0 4px 0;">3-column format: third column is either category names (auto-colored) or direct CSS colors.</p>
+                <p style="margin:0 0 4px 0;">4-column format: third column is category, fourth column is CSS color per category.</p>
+                <pre style="background:#1a1a1a;padding:6px 8px;border-radius:3px;font-size:11px;color:#aaa;margin:6px 0 0 0;overflow-x:auto;">bodyid_pre,bodyid_post,pathway,color
+10539,11307,excitatory,#e41a1c
+11307,12449,inhibitory,#377eb8</pre>
+            </div>
 
             <h3 style="color:#d4a017;font-size:14px;">Data Source</h3>
-            <p><em>Drosophila</em> connectome — <a href="https://${this.viewer.data.raw.dataSource ? this.viewer.data.raw.dataSource.server : 'neuprint-cns.janelia.org'}" style="color:#6a9fc0;">${this.viewer.data.raw.dataSource ? this.viewer.data.raw.dataSource.server : 'neuprint-cns.janelia.org'}</a>, dataset <em>${this.viewer.data.raw.dataSource ? this.viewer.data.raw.dataSource.dataset : 'cns'}</em>. Skeletons via navis; connectivity via fetch_adjacencies.</p>
+            <p>Connectome data from <a href="https://${this.viewer.data.raw.dataSource ? this.viewer.data.raw.dataSource.server : 'neuprint-cns.janelia.org'}" style="color:#6a9fc0;">${this.viewer.data.raw.dataSource ? this.viewer.data.raw.dataSource.server : 'neuprint-cns.janelia.org'}</a>, dataset <em>${this.viewer.data.raw.dataSource ? this.viewer.data.raw.dataSource.dataset : 'cns'}</em>. Skeletons via navis; connectivity via neuprint-python.</p>
         `;
         document.body.appendChild(ov);
         return ov;
@@ -10543,6 +11661,8 @@ class UIManager {
         // Gizmo: update WebGL canvas and body div background so corners match the canvas
         if (this._gizmoWebGLCanvas) this._gizmoWebGLCanvas.style.background = t.gizmoBg;
         if (this._gizmoBody)       this._gizmoBody.style.background       = t.gizmoBg;
+        // Update synapse outline colors to match theme (black outlines in light mode, white in dark)
+        if (this.viewer && this.viewer.synapse) this.viewer.synapse._updateOutlineColors();
     }
 }
 
@@ -10576,6 +11696,30 @@ class NeuronViewer {
         const restored = this.session.tryRestore();
         if (restored) {
             console.log('Session restored from localStorage');
+        }
+
+        // Auto-create embedded synapse groups from generation-time CSVs
+        if (DATA.synapseData && DATA.embeddedSynapseGroups && DATA.embeddedSynapseGroups.length > 0) {
+            this.synapse.loadData().then(() => {
+                if (!this.synapse.loaded) return;
+                const existingLabels = new Set(this.synapse.groups.map(g => g.label));
+                let created = 0;
+                for (const sg of DATA.embeddedSynapseGroups) {
+                    if (existingLabels.has(sg.label)) continue;
+                    const allIdx = [];
+                    for (const pk of sg.pairs) {
+                        const arr = this.synapse.pairIndex.get(pk);
+                        if (arr) allIdx.push(...arr);
+                    }
+                    if (allIdx.length > 0) {
+                        this.synapse.createGroupFromIndices(allIdx, {
+                            label: sg.label, color: sg.color, synapseType: 'both'
+                        });
+                        created++;
+                    }
+                }
+                if (created > 0 && this.ui) this.ui._updateSynapsePanel();
+            });
         }
 
         console.log('NeuronViewer initialized');
