@@ -41,7 +41,7 @@ An "environment" is an isolated workspace so this project's libraries don't inte
 Open Terminal (Mac) or Anaconda Prompt (Windows) and run these commands one at a time:
 
 ```bash
-conda create -n neuron_visualizer python=3.9
+conda create -n neuron_visualizer python=3.10
 ```
 
 It will ask you to confirm — type `y` and press Enter.
@@ -78,10 +78,13 @@ This installs everything the tool needs. It might take a few minutes.
 
 ## Step 4: Download This Repository
 
+**Before you download:** Decide where on your computer you want this folder to live — your Desktop, Documents, or a dedicated projects folder. Once it's there, the HTML files you generate will be saved *inside* that folder, so pick somewhere convenient and permanent. Moving the folder later is fine, but you'd have to update any paths you've set.
+
 If you haven't already, download this code:
 
 **Option A — If you have git:**
 ```bash
+cd ~/Documents    # navigate to where you want the folder first
 git clone https://github.com/sauvolac1/neuron-visualizer.git
 cd neuron-visualizer
 ```
@@ -99,7 +102,7 @@ cd neuron-visualizer
 
 ## Step 5: Get Your neuPrint Token
 
-1. Go to https://neuprint-cns.janelia.org/
+1. Go to https://neuprint.janelia.org/
 2. Sign in with your Google account
 3. Click your profile icon (top right) → **Account**
 4. Copy the **Auth Token** (it's a long string starting with `eyJ...`)

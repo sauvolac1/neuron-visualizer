@@ -1,6 +1,6 @@
 navis>=1.10
 neuprint-python>=0.6
-trimesh>=4.0
+trimesh>=4.0,<4.9
 matplotlib>=3.7
 pandas>=2.0
 numpy>=1.24
@@ -9,4 +9,5 @@ cloud-volume>=12.0
 tqdm>=4.60
 scipy>=1.10
 pyfqmr>=0.5
+dvidtools>=0.4
 jupyter>=1.0

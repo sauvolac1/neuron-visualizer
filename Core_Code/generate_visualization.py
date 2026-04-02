@@ -109,14 +109,14 @@ ANCHOR_MAX_FACES = 200
 # neuPrint Client
 # ============================================================
 
-def get_client(server='neuprint-cns.janelia.org', dataset='cns', token=None):
+def get_client(server='neuprint.janelia.org', dataset='cns', token=None):
     """Initialize and return a neuPrint client.
 
     Args:
         server:   neuPrint server URL
         dataset:  Dataset name (e.g. 'cns', 'hemibrain:v1.2.1')
         token:    neuPrint API token. If None, reads from NEUPRINT_TOKEN env var.
-                  Get yours at: https://neuprint-cns.janelia.org/ → Account → Auth Token
+                  Get yours at: https://neuprint.janelia.org/ → Account → Auth Token
     """
     if token is None:
         token = os.environ.get('NEUPRINT_TOKEN')
@@ -125,7 +125,7 @@ def get_client(server='neuprint-cns.janelia.org', dataset='cns', token=None):
             'No neuPrint token provided. Either:\n'
             '  1. Pass token= to get_client() or generate_visualization()\n'
             '  2. Set the NEUPRINT_TOKEN environment variable\n'
-            '  Get your token at: https://neuprint-cns.janelia.org/ → Account → Auth Token'
+            '  Get your token at: https://neuprint.janelia.org/ → Account → Auth Token'
         )
     return neuprint.Client(server=server, dataset=dataset, token=token)
 
@@ -1773,7 +1773,7 @@ def generate_visualization(pattern, continuous_csvs=None, categorical_csvs=None,
                            output_dir=None, auto_open=False,
                            skip_synapses=False, synapse_limit=None,
                            use_meshes=False, mesh_faces='auto', max_file_mb=500,
-                           server='neuprint-cns.janelia.org', dataset='cns',
+                           server='neuprint.janelia.org', dataset='cns',
                            token=None,
                            # Internal / legacy args
                            score_modes=None, _cat_modes=None,
@@ -1905,7 +1905,7 @@ def generate_visualization(pattern, continuous_csvs=None, categorical_csvs=None,
         norm_params, regex_term=regex_term,
         neuron_meshes=neuron_meshes,
         voxel_size_nm=voxel_size_nm,
-        _data_source={'server': server or 'neuprint-cns.janelia.org',
+        _data_source={'server': server or 'neuprint.janelia.org',
                       'dataset': dataset or 'cns'},
     )
 
@@ -2006,8 +2006,8 @@ def main():
         help='Max faces per neuron mesh: "auto" (default), a number, or 0 for no decimation')
     parser.add_argument('--max-file-mb', type=float, default=500,
         help='Target file size in MB when mesh-faces=auto (default: 500)')
-    parser.add_argument('--server', default='neuprint-cns.janelia.org',
-        help='neuPrint server URL (default: neuprint-cns.janelia.org)')
+    parser.add_argument('--server', default='neuprint.janelia.org',
+        help='neuPrint server URL (default: neuprint.janelia.org)')
     parser.add_argument('--dataset', default='cns',
         help='neuPrint dataset (default: cns)')
     parser.add_argument('--token', default=None,
@@ -11409,7 +11409,7 @@ FB1B,-0.32,#377eb8      11307,beta,#377eb8</pre>
             </div>
 
             <h3 style="color:#d4a017;font-size:14px;">Data Source</h3>
-            <p>Connectome data from <a href="https://${this.viewer.data.raw.dataSource ? this.viewer.data.raw.dataSource.server : 'neuprint-cns.janelia.org'}" style="color:#6a9fc0;">${this.viewer.data.raw.dataSource ? this.viewer.data.raw.dataSource.server : 'neuprint-cns.janelia.org'}</a>, dataset <em>${this.viewer.data.raw.dataSource ? this.viewer.data.raw.dataSource.dataset : 'cns'}</em>. Skeletons via navis; connectivity via neuprint-python.</p>
+            <p>Connectome data from <a href="https://${this.viewer.data.raw.dataSource ? this.viewer.data.raw.dataSource.server : 'neuprint.janelia.org'}" style="color:#6a9fc0;">${this.viewer.data.raw.dataSource ? this.viewer.data.raw.dataSource.server : 'neuprint.janelia.org'}</a>, dataset <em>${this.viewer.data.raw.dataSource ? this.viewer.data.raw.dataSource.dataset : 'cns'}</em>. Skeletons via navis; connectivity via neuprint-python.</p>
         `;
         document.body.appendChild(ov);
         return ov;

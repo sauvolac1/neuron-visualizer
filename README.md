@@ -11,15 +11,24 @@ New to Python? See [README_IF_YOURE_LOST.md](README_IF_YOURE_LOST.md).
 
 ## Setup
 
-Requires **Python 3.9+**.
+Requires **Python 3.10+**.
+
+> **Choose your location first.** Clone or download this repository to wherever you want it to live — your generated HTML files will be saved inside this folder, so pick somewhere permanent before you start.
 
 ```bash
 git clone https://github.com/sauvolac1/neuron-visualizer.git
 cd neuron-visualizer
+```
+
+> **Use a new environment.** Install into a fresh conda or venv environment, *not* your base environment. Installing into base can break other tools.
+
+```bash
+conda create -n neuron_visualizer python=3.10
+conda activate neuron_visualizer
 pip install -r requirements.txt
 ```
 
-Get a neuPrint token: https://neuprint-cns.janelia.org/ → Account → Auth Token.
+Get a neuPrint token: https://neuprint.janelia.org/ → Account → Auth Token.
 
 ## Usage
 
@@ -39,7 +48,7 @@ Output is a standalone HTML — open it directly in Chrome.
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `patterns` | required | Neuron type patterns (e.g. `FB`, `EPG`, `'^LNO\|GLNO.*'`) |
-| `--server` | `neuprint-cns.janelia.org` | neuPrint server |
+| `--server` | `neuprint.janelia.org` | neuPrint server |
 | `--dataset` | `cns` | neuPrint dataset |
 | `--token` | `$NEUPRINT_TOKEN` | API token |
 | `--continuous` | | Continuous color CSVs |
