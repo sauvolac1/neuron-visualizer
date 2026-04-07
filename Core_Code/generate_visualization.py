@@ -6613,6 +6613,26 @@ class UIManager {
         }
     }
 
+    _rebuildViewBank() {
+        if (!this._viewRow1) return;
+        while (this._viewRow1.firstChild) this._viewRow1.removeChild(this._viewRow1.firstChild);
+        while (this._viewRow2.firstChild) this._viewRow2.removeChild(this._viewRow2.firstChild);
+        this._viewBtns = [];
+        this._viewRow2.style.display = 'none';
+        if (this._addViewBtn) {
+            this._addViewBtn.disabled = false;
+            this._addViewBtn.style.opacity = '1';
+            this._addViewBtn.style.cursor = 'pointer';
+        }
+        const views = this._savedViews.slice();
+        this._savedViews = [];
+        for (const v of views) this._addSavedView(v);
+        if (this._activeViewIdx !== null && this._viewBtns[this._activeViewIdx]) {
+            this._viewBtns[this._activeViewIdx].style.background = 'rgb(212,160,23)';
+            this._viewBtns[this._activeViewIdx].style.color = '#000';
+        }
+    }
+
     // ── Saved Sets ────────────────────────────────────────────────────────────
 
     _captureSet() {
@@ -6837,6 +6857,26 @@ class UIManager {
         }
     }
 
+    _rebuildSetBank() {
+        if (!this._setsRow1) return;
+        while (this._setsRow1.firstChild) this._setsRow1.removeChild(this._setsRow1.firstChild);
+        while (this._setsRow2.firstChild) this._setsRow2.removeChild(this._setsRow2.firstChild);
+        this._setsBtns = [];
+        this._setsRow2.style.display = 'none';
+        if (this._addSetBtn) {
+            this._addSetBtn.disabled = false;
+            this._addSetBtn.style.opacity = '1';
+            this._addSetBtn.style.cursor = 'pointer';
+        }
+        const sets = this._savedSets.slice();
+        this._savedSets = [];
+        for (const s of sets) this._addSavedSet(s);
+        if (this._activeSetIdx !== null && this._setsBtns[this._activeSetIdx]) {
+            this._setsBtns[this._activeSetIdx].style.background = 'rgb(212,160,23)';
+            this._setsBtns[this._activeSetIdx].style.color = '#000';
+        }
+    }
+
     // ── ROI Saved Sets ─────────────────────────────────────────────────────
 
     _captureRoiSet() {
@@ -6950,6 +6990,26 @@ class UIManager {
         this._roiSavedSets = [];
         for (const s of sets) this._addRoiSavedSet(s);
 
+        if (this._roiActiveSetIdx !== null && this._roiSetsBtns[this._roiActiveSetIdx]) {
+            this._roiSetsBtns[this._roiActiveSetIdx].style.background = 'rgb(212,160,23)';
+            this._roiSetsBtns[this._roiActiveSetIdx].style.color = '#000';
+        }
+    }
+
+    _rebuildRoiSetBank() {
+        if (!this._roiSetsRow1) return;
+        while (this._roiSetsRow1.firstChild) this._roiSetsRow1.removeChild(this._roiSetsRow1.firstChild);
+        while (this._roiSetsRow2.firstChild) this._roiSetsRow2.removeChild(this._roiSetsRow2.firstChild);
+        this._roiSetsBtns = [];
+        this._roiSetsRow2.style.display = 'none';
+        if (this._roiAddSetBtn) {
+            this._roiAddSetBtn.disabled = false;
+            this._roiAddSetBtn.style.opacity = '1';
+            this._roiAddSetBtn.style.cursor = 'pointer';
+        }
+        const sets = this._roiSavedSets.slice();
+        this._roiSavedSets = [];
+        for (const s of sets) this._addRoiSavedSet(s);
         if (this._roiActiveSetIdx !== null && this._roiSetsBtns[this._roiActiveSetIdx]) {
             this._roiSetsBtns[this._roiActiveSetIdx].style.background = 'rgb(212,160,23)';
             this._roiSetsBtns[this._roiActiveSetIdx].style.color = '#000';
@@ -10472,7 +10532,7 @@ class UIManager {
         body.appendChild(motionLabel);
         const motionSelect = document.createElement('select');
         motionSelect.style.cssText = _selectStyle;
-        [['360', 'Full 360\u00B0 rotation'], ['pivot', 'Pivot (\u00B1 N\u00B0)']].forEach(([v, l]) => {
+        [['360', 'Full 360\u00B0 rotation'], ['pivot', 'Pivot (\u00B1 N\u00B0)'], ['tiling', 'Neuron reveal (tiling)']].forEach(([v, l]) => {
             const o = document.createElement('option'); o.value = v; o.textContent = l; motionSelect.appendChild(o);
         });
         body.appendChild(motionSelect);
@@ -10489,10 +10549,50 @@ class UIManager {
         pivotInput.style.cssText = 'width:50px;padding:3px 5px;background:#222;color:#fff;border:1px solid #555;border-radius:3px;font-size:13px;';
         pivotRow.appendChild(pivotInput);
         body.appendChild(pivotRow);
-        motionSelect.onchange = () => {
+
+        // Tiling options (hidden until tiling selected)
+        const tilingOptionsDiv = document.createElement('div');
+        tilingOptionsDiv.style.cssText = 'display:none;flex-direction:column;gap:6px;margin-bottom:10px;';
+        const _mkTilingRow = (labelText, el) => {
+            const r = document.createElement('div');
+            r.style.cssText = 'display:flex;align-items:center;gap:8px;';
+            const lbl = document.createElement('span');
+            lbl.textContent = labelText;
+            lbl.style.cssText = 'font-size:12px;color:#ccc;min-width:80px;';
+            r.appendChild(lbl); r.appendChild(el);
+            return r;
+        };
+        const tilingModeSelect = document.createElement('select');
+        tilingModeSelect.style.cssText = 'flex:1;padding:3px 5px;background:#222;color:#fff;border:1px solid #555;border-radius:3px;font-size:12px;';
+        [['cumulative', 'Cumulative (add one)'], ['sequential', 'Sequential (one at a time)']].forEach(([v, l]) => {
+            const o = document.createElement('option'); o.value = v; o.textContent = l; tilingModeSelect.appendChild(o);
+        });
+        tilingOptionsDiv.appendChild(_mkTilingRow('Reveal:', tilingModeSelect));
+        const tilingOrderSelect = document.createElement('select');
+        tilingOrderSelect.style.cssText = 'flex:1;padding:3px 5px;background:#222;color:#fff;border:1px solid #555;border-radius:3px;font-size:12px;';
+        [['alpha', 'Alphabetical by type'], ['random', 'Random']].forEach(([v, l]) => {
+            const o = document.createElement('option'); o.value = v; o.textContent = l; tilingOrderSelect.appendChild(o);
+        });
+        tilingOptionsDiv.appendChild(_mkTilingRow('Order:', tilingOrderSelect));
+        const tilingDwellInput = document.createElement('input');
+        tilingDwellInput.type = 'number'; tilingDwellInput.value = '0.5'; tilingDwellInput.min = '0.1'; tilingDwellInput.max = '10'; tilingDwellInput.step = '0.1';
+        tilingDwellInput.style.cssText = 'width:55px;padding:3px 5px;background:#222;color:#fff;border:1px solid #555;border-radius:3px;font-size:12px;';
+        tilingOptionsDiv.appendChild(_mkTilingRow('Dwell (s):', tilingDwellInput));
+        body.appendChild(tilingOptionsDiv);
+
+        const _updateMotionVisibility = () => {
+            const isTiling = motionSelect.value === 'tiling';
             pivotRow.style.display = motionSelect.value === 'pivot' ? 'flex' : 'none';
+            tilingOptionsDiv.style.display = isTiling ? 'flex' : 'none';
+            axisLabel.style.display = isTiling ? 'none' : '';
+            axisSelect.style.display = isTiling ? 'none' : '';
+            centerLabel.style.display = isTiling ? 'none' : '';
+            centerSelect.style.display = isTiling ? 'none' : '';
+            speedRow.style.display = isTiling ? 'none' : 'flex';
             updateDuration();
         };
+        motionSelect.onchange = _updateMotionVisibility;
+        tilingDwellInput.oninput = () => updateDuration();
 
         // 2. Axis
         const axisLabel = document.createElement('div');
@@ -10541,6 +10641,15 @@ class UIManager {
         body.appendChild(speedRow);
 
         const updateDuration = () => {
+            if (motionSelect.value === 'tiling') {
+                const dwell = parseFloat(tilingDwellInput.value) || 0.5;
+                const nNeurons = this.vis.highlightedSet && this.vis.highlightedSet.size > 0
+                    ? this.vis.highlightedSet.size
+                    : (this.data && this.data.neurons ? this.data.neurons.length : 0);
+                const dur = nNeurons * dwell + 1; // +1s hold at end
+                durationSpan.textContent = `\u2192 ~${dur.toFixed(1)}s (${nNeurons} neurons)`;
+                return;
+            }
             const speed = parseFloat(speedInput.value) || 30;
             const isPivot = motionSelect.value === 'pivot';
             const angle = isPivot ? (parseFloat(pivotInput.value) || 45) * 4 : 360;
@@ -10589,13 +10698,17 @@ class UIManager {
 
         // Gather current settings from dropdowns
         const getSettings = () => {
+            const isTiling = motionSelect.value === 'tiling';
             const speed = parseFloat(speedInput.value) || 30;
             const isPivot = motionSelect.value === 'pivot';
             const pivotAngle = isPivot ? (parseFloat(pivotInput.value) || 45) : 360;
             const [centerType, coordType] = centerSelect.value.split('_');
             const axis = resolveAxis(axisSelect.value, coordType);
             const center = centerType === 'selection' ? getSelectionCenter() : null;
-            return { speed, isPivot, pivotAngle, axis, center };
+            const tilingMode = tilingModeSelect.value;
+            const tilingOrder = tilingOrderSelect.value;
+            const tilingDwell = parseFloat(tilingDwellInput.value) || 0.5;
+            return { speed, isPivot, pivotAngle, axis, center, isTiling, tilingMode, tilingOrder, tilingDwell };
         };
 
         // Preview button
@@ -10631,6 +10744,14 @@ class UIManager {
             const fmtType = fmtSelect.value;
             dialog.remove();
             this._videoDialog = null;
+            if (s.isTiling) {
+                if (fmtType === 'gif') {
+                    this._recordTilingGif(s.tilingMode, s.tilingOrder, s.tilingDwell);
+                } else {
+                    this._recordTilingAvi(s.tilingMode, s.tilingOrder, s.tilingDwell);
+                }
+                return;
+            }
             // For pivot: full cycle = +angle, center, -angle, center = 4x angle
             const totalDeg = s.isPivot ? s.pivotAngle * 4 : 360;
             if (fmtType === 'gif') {
@@ -10828,6 +10949,192 @@ class UIManager {
         };
         animate();
     }
+
+    // ── Tiling (neuron reveal) recording ──────────────────────────────────────
+
+    _getTilingNeurons(tilingOrder) {
+        const vis = this.viewer.vis;
+        let neurons;
+        if (vis.highlightedSet.size > 0) {
+            neurons = [...vis.highlightedSet];
+        } else {
+            const allNeurons = this.viewer.data.neurons || [];
+            const keys = new Set(allNeurons.map(n => vis.hlModeByNeuron ? String(n.bodyId) : n.type));
+            neurons = [...keys];
+        }
+        if (tilingOrder === 'random') {
+            for (let i = neurons.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [neurons[i], neurons[j]] = [neurons[j], neurons[i]];
+            }
+        } else {
+            neurons.sort((a, b) => String(a).localeCompare(String(b)));
+        }
+        return neurons;
+    }
+
+    _applyTilingVisibility(vis, tilingMode, neurons, neuronIdx) {
+        const subset = tilingMode === 'cumulative'
+            ? neurons.slice(0, neuronIdx + 1)
+            : [neurons[neuronIdx]];
+        vis.highlightedSet = new Set(subset);
+        vis._explicitHideAll = false;
+        const clipMap = {};
+        for (const k of subset) clipMap[k] = false;
+        vis.clipToRoi = clipMap;
+        vis._applyAllVisibility();
+    }
+
+    _recordTilingAvi(tilingMode, tilingOrder, dwellSecs) {
+        const vis = this.viewer.vis;
+        const scene = this.viewer.scene;
+        const renderer = scene.renderer;
+        const camera = scene.camera;
+        const canvas = scene.canvas;
+
+        const neurons = this._getTilingNeurons(tilingOrder);
+        if (neurons.length === 0) { alert('No neurons to reveal.'); return; }
+
+        const savedHighlighted    = new Set(vis.highlightedSet);
+        const savedClipToRoi      = Object.assign({}, vis.clipToRoi);
+        const savedExplicitHideAll = vis._explicitHideAll;
+
+        const fps = 30;
+        const framesPerNeuron = Math.max(1, Math.ceil(dwellSecs * fps));
+        const holdFrames = fps; // 1 s hold on final state
+        const totalFrames = neurons.length * framesPerNeuron + holdFrames;
+
+        const pr = renderer.getPixelRatio();
+        const origW = canvas.clientWidth;
+        const origH = canvas.clientHeight;
+        renderer.setPixelRatio(1);
+        renderer.setSize(origW, origH);
+        camera.aspect = origW / origH;
+        camera.updateProjectionMatrix();
+        const w = origW & ~1;
+        const h = origH & ~1;
+
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:9998;pointer-events:none;';
+        const badge = document.createElement('div');
+        badge.style.cssText = 'position:fixed;top:50px;left:50%;transform:translateX(-50%);z-index:9999;background:rgba(200,0,0,0.8);color:#fff;padding:8px 20px;border-radius:20px;font-size:14px;font-weight:bold;';
+        badge.textContent = '\u{1F534} Capturing frames...  0%';
+        overlay.appendChild(badge);
+        document.body.appendChild(overlay);
+
+        const jpegFrames = [];
+        let frame = 0;
+        scene._recordingActive = true;
+
+        const captureFrame = () => {
+            if (frame >= totalFrames) {
+                scene._recordingActive = false;
+                vis.highlightedSet = savedHighlighted;
+                vis.clipToRoi = savedClipToRoi;
+                vis._explicitHideAll = savedExplicitHideAll;
+                vis._applyAllVisibility();
+                renderer.setPixelRatio(pr);
+                renderer.setSize(origW, origH);
+                camera.aspect = origW / origH;
+                camera.updateProjectionMatrix();
+                badge.textContent = '\u{1F534} Building AVI...';
+                setTimeout(() => this._buildAvi(jpegFrames, w, h, fps, overlay), 100);
+                return;
+            }
+
+            const neuronIdx = Math.min(Math.floor(frame / framesPerNeuron), neurons.length - 1);
+            this._applyTilingVisibility(vis, tilingMode, neurons, neuronIdx);
+
+            renderer.render(scene.scene, camera);
+            scene._captureScaleBar = true; scene._renderScaleBar(); scene._captureScaleBar = false;
+            const compC = document.createElement('canvas');
+            compC.width = canvas.width; compC.height = canvas.height;
+            const compX = compC.getContext('2d');
+            compX.drawImage(canvas, 0, 0);
+            if (scene._scaleBarCanvas) compX.drawImage(scene._scaleBarCanvas, 0, 0, compC.width, compC.height);
+            const dataUrl = compC.toDataURL('image/jpeg', 0.92);
+            const b64 = dataUrl.split(',')[1];
+            const raw = atob(b64);
+            const arr = new Uint8Array(raw.length);
+            for (let j = 0; j < raw.length; j++) arr[j] = raw.charCodeAt(j);
+            jpegFrames.push(arr);
+
+            badge.textContent = `\u{1F534} Capturing... ${Math.round((frame + 1) / totalFrames * 100)}% (${Math.min(neuronIdx + 1, neurons.length)}/${neurons.length})`;
+            frame++;
+            setTimeout(captureFrame, 0);
+        };
+        captureFrame();
+    }
+
+    _recordTilingGif(tilingMode, tilingOrder, dwellSecs) {
+        const vis = this.viewer.vis;
+        const scene = this.viewer.scene;
+        const renderer = scene.renderer;
+        const camera = scene.camera;
+        const canvas = scene.canvas;
+
+        const neurons = this._getTilingNeurons(tilingOrder);
+        if (neurons.length === 0) { alert('No neurons to reveal.'); return; }
+
+        const savedHighlighted     = new Set(vis.highlightedSet);
+        const savedClipToRoi       = Object.assign({}, vis.clipToRoi);
+        const savedExplicitHideAll = vis._explicitHideAll;
+
+        const fps = 15;
+        const w = canvas.width;
+        const h = canvas.height;
+        const gifScale = Math.min(1, 800 / w);
+        const gw = Math.round(w * gifScale);
+        const gh = Math.round(h * gifScale);
+        const delay = Math.round(1000 / fps);
+
+        const framesPerNeuron = Math.max(1, Math.ceil(dwellSecs * fps));
+        const holdFrames = fps; // 1 s hold
+        const totalFrames = neurons.length * framesPerNeuron + holdFrames;
+
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:9998;pointer-events:none;';
+        const badge = document.createElement('div');
+        badge.style.cssText = 'position:fixed;top:50px;left:50%;transform:translateX(-50%);z-index:9999;background:rgba(200,0,0,0.8);color:#fff;padding:8px 20px;border-radius:20px;font-size:14px;font-weight:bold;';
+        badge.textContent = '\u{1F534} Capturing frames...  0%';
+        overlay.appendChild(badge);
+        document.body.appendChild(overlay);
+
+        const offscreen = document.createElement('canvas');
+        offscreen.width = gw; offscreen.height = gh;
+        const offCtx = offscreen.getContext('2d');
+        const frames = [];
+        let frame = 0;
+        scene._recordingActive = true;
+
+        const captureFrame = () => {
+            if (frame >= totalFrames) {
+                scene._recordingActive = false;
+                vis.highlightedSet = savedHighlighted;
+                vis.clipToRoi = savedClipToRoi;
+                vis._explicitHideAll = savedExplicitHideAll;
+                vis._applyAllVisibility();
+                badge.textContent = '\u{1F534} Encoding GIF...';
+                setTimeout(() => this._encodeGif(frames, gw, gh, delay, overlay), 50);
+                return;
+            }
+
+            const neuronIdx = Math.min(Math.floor(frame / framesPerNeuron), neurons.length - 1);
+            this._applyTilingVisibility(vis, tilingMode, neurons, neuronIdx);
+
+            renderer.render(scene.scene, camera);
+            scene._captureScaleBar = true; scene._renderScaleBar(); scene._captureScaleBar = false;
+            offCtx.drawImage(canvas, 0, 0, gw, gh);
+            frames.push(offCtx.getImageData(0, 0, gw, gh));
+
+            badge.textContent = `\u{1F534} Capturing... ${Math.round((frame + 1) / totalFrames * 100)}% (${Math.min(neuronIdx + 1, neurons.length)}/${neurons.length})`;
+            frame++;
+            setTimeout(captureFrame, 0);
+        };
+        captureFrame();
+    }
+
+    // ── Rotation recording ─────────────────────────────────────────────────────
 
     _recordRotationAvi(axis, degPerSec, resolution, orbitCenter, totalDeg, pivotAngle) {
         const scene = this.viewer.scene;
