@@ -10562,18 +10562,199 @@ class UIManager {
             r.appendChild(lbl); r.appendChild(el);
             return r;
         };
+        const _subSelectStyle = 'flex:1;padding:3px 5px;background:#222;color:#fff;border:1px solid #555;border-radius:3px;font-size:12px;';
         const tilingModeSelect = document.createElement('select');
-        tilingModeSelect.style.cssText = 'flex:1;padding:3px 5px;background:#222;color:#fff;border:1px solid #555;border-radius:3px;font-size:12px;';
+        tilingModeSelect.style.cssText = _subSelectStyle;
         [['cumulative', 'Cumulative (add one)'], ['sequential', 'Sequential (one at a time)']].forEach(([v, l]) => {
             const o = document.createElement('option'); o.value = v; o.textContent = l; tilingModeSelect.appendChild(o);
         });
         tilingOptionsDiv.appendChild(_mkTilingRow('Reveal:', tilingModeSelect));
+
         const tilingOrderSelect = document.createElement('select');
-        tilingOrderSelect.style.cssText = 'flex:1;padding:3px 5px;background:#222;color:#fff;border:1px solid #555;border-radius:3px;font-size:12px;';
-        [['alpha', 'Alphabetical by type'], ['random', 'Random']].forEach(([v, l]) => {
+        tilingOrderSelect.style.cssText = _subSelectStyle;
+        [['sidebar', 'Sidebar order'], ['alpha', 'Alphabetical'], ['random', 'Random'],
+         ['score', 'By color score'], ['savedsets', 'Saved sets (phases)'],
+         ['custom', 'Custom (drag to reorder)']].forEach(([v, l]) => {
             const o = document.createElement('option'); o.value = v; o.textContent = l; tilingOrderSelect.appendChild(o);
         });
         tilingOptionsDiv.appendChild(_mkTilingRow('Order:', tilingOrderSelect));
+
+        // Score mode picker (visible only when order = score)
+        const scorePickerRow = document.createElement('div');
+        scorePickerRow.style.cssText = 'display:none;align-items:center;gap:8px;';
+        const scoreLbl = document.createElement('span');
+        scoreLbl.textContent = 'Score:';
+        scoreLbl.style.cssText = 'font-size:12px;color:#ccc;min-width:80px;';
+        scorePickerRow.appendChild(scoreLbl);
+        const scoreSelect = document.createElement('select');
+        scoreSelect.style.cssText = _subSelectStyle;
+        const modes = this.viewer.data.colorModes || [];
+        modes.forEach((m, i) => {
+            if (m.is_scalar && m.type_values) {
+                const o = document.createElement('option');
+                o.value = String(i);
+                o.textContent = m.name || m.label || `Mode ${i}`;
+                scoreSelect.appendChild(o);
+            }
+        });
+        scorePickerRow.appendChild(scoreSelect);
+        tilingOptionsDiv.appendChild(scorePickerRow);
+
+        // Reverse checkbox
+        const reverseRow = document.createElement('div');
+        reverseRow.style.cssText = 'display:flex;align-items:center;gap:8px;';
+        const reverseLbl = document.createElement('span');
+        reverseLbl.textContent = '';
+        reverseLbl.style.cssText = 'min-width:80px;';
+        reverseRow.appendChild(reverseLbl);
+        const reverseChk = document.createElement('input');
+        reverseChk.type = 'checkbox';
+        reverseChk.id = '_tilingReverse';
+        const reverseLabel = document.createElement('label');
+        reverseLabel.htmlFor = '_tilingReverse';
+        reverseLabel.textContent = 'Reverse';
+        reverseLabel.style.cssText = 'font-size:12px;color:#ccc;cursor:pointer;';
+        reverseRow.appendChild(reverseChk);
+        reverseRow.appendChild(reverseLabel);
+        tilingOptionsDiv.appendChild(reverseRow);
+
+        // Custom drag-to-reorder list (visible only when order = custom)
+        const customListWrap = document.createElement('div');
+        customListWrap.style.cssText = 'display:none;flex-direction:column;gap:2px;margin-top:2px;';
+        const customListScroll = document.createElement('div');
+        customListScroll.style.cssText = 'max-height:200px;overflow-y:auto;border:1px solid #444;border-radius:3px;'
+            + 'background:#1a1a1a;padding:2px;';
+        customListWrap.appendChild(customListScroll);
+        tilingOptionsDiv.appendChild(customListWrap);
+
+        // State for custom ordering
+        let customOrder = []; // array of IDs in user-defined order
+
+        const _populateCustomList = () => {
+            customListScroll.innerHTML = '';
+            const vis = this.viewer.vis;
+            const data = this.viewer.data;
+            const typeNeurons = data.typeNeurons || {};
+            const neuronType = data.neuronType || {};
+
+            // Always build list at individual neuron (body ID) level
+            let items;
+            if (vis.highlightedSet.size > 0) {
+                // Expand any type names to body IDs
+                items = [];
+                for (const id of vis.highlightedSet) {
+                    if (typeNeurons[id]) items.push(...typeNeurons[id]);
+                    else items.push(String(id));
+                }
+                // Sort by instance name (matches sidebar display)
+                const il = data.instanceLookup || {};
+                items.sort((a, b) => {
+                    const na = il[a] || neuronType[a] || a;
+                    const nb = il[b] || neuronType[b] || b;
+                    const d = na.localeCompare(nb);
+                    return d !== 0 ? d : String(a).localeCompare(String(b));
+                });
+            } else {
+                // All neurons in sidebar type order
+                items = [];
+                for (const t of (data.allTypes || [])) {
+                    items.push(...(typeNeurons[t] || []));
+                }
+            }
+            customOrder = items.slice();
+
+            let dragSrc = null;
+            for (let i = 0; i < items.length; i++) {
+                const row = document.createElement('div');
+                row.draggable = true;
+                row.dataset.idx = String(i);
+                row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 6px;'
+                    + 'background:#222;border:1px solid transparent;border-radius:2px;cursor:grab;'
+                    + 'font-size:11px;color:#ccc;user-select:none;';
+
+                const handle = document.createElement('span');
+                handle.textContent = '\u2261'; // ≡
+                handle.style.cssText = 'color:#666;font-size:14px;';
+                row.appendChild(handle);
+
+                // Color swatch
+                const swatch = document.createElement('span');
+                const modeIdx = vis.activeColorMode;
+                const mode = data.colorModes[modeIdx];
+                const bid = items[i];
+                const typ = neuronType[bid] || bid;
+                const col = (mode?.colors?.[bid]) || (mode?.type_colors?.[typ]) || '#888';
+                swatch.style.cssText = `width:10px;height:10px;border-radius:2px;background:${col};flex-shrink:0;`;
+                row.appendChild(swatch);
+
+                const label = document.createElement('span');
+                const instName = (data.instanceLookup || {})[bid] || typ;
+                label.textContent = instName + ' (' + bid + ')';
+                label.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+                row.appendChild(label);
+
+                row.addEventListener('dragstart', (e) => {
+                    dragSrc = row;
+                    row.style.opacity = '0.4';
+                    e.dataTransfer.effectAllowed = 'move';
+                });
+                row.addEventListener('dragend', () => {
+                    row.style.opacity = '1';
+                    dragSrc = null;
+                    for (const c of customListScroll.children) {
+                        c.style.borderTop = '1px solid transparent';
+                        c.style.borderBottom = '1px solid transparent';
+                    }
+                });
+                row.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    const rect = row.getBoundingClientRect();
+                    const midY = rect.top + rect.height / 2;
+                    for (const c of customListScroll.children) {
+                        c.style.borderTop = '1px solid transparent';
+                        c.style.borderBottom = '1px solid transparent';
+                    }
+                    if (e.clientY < midY) {
+                        row.style.borderTop = '1px solid rgb(212,160,23)';
+                    } else {
+                        row.style.borderBottom = '1px solid rgb(212,160,23)';
+                    }
+                });
+                row.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    if (!dragSrc || dragSrc === row) return;
+                    const rect = row.getBoundingClientRect();
+                    const midY = rect.top + rect.height / 2;
+                    if (e.clientY < midY) {
+                        customListScroll.insertBefore(dragSrc, row);
+                    } else {
+                        customListScroll.insertBefore(dragSrc, row.nextSibling);
+                    }
+                    // Rebuild customOrder from DOM order
+                    customOrder = [];
+                    for (const c of customListScroll.children) {
+                        const idx = parseInt(c.dataset.idx, 10);
+                        customOrder.push(items[idx]);
+                    }
+                });
+
+                customListScroll.appendChild(row);
+            }
+        };
+
+        const _updateTilingOrderUI = () => {
+            const ord = tilingOrderSelect.value;
+            scorePickerRow.style.display = ord === 'score' ? 'flex' : 'none';
+            reverseRow.style.display = (ord === 'random' || ord === 'savedsets') ? 'none' : 'flex';
+            customListWrap.style.display = ord === 'custom' ? 'flex' : 'none';
+            if (ord === 'custom' && customListScroll.children.length === 0) {
+                _populateCustomList();
+            }
+        };
+        tilingOrderSelect.onchange = () => { _updateTilingOrderUI(); updateDuration(); };
+        _updateTilingOrderUI(); // safe: doesn't touch updateDuration
+
         const tilingDwellInput = document.createElement('input');
         tilingDwellInput.type = 'number'; tilingDwellInput.value = '0.5'; tilingDwellInput.min = '0.1'; tilingDwellInput.max = '10'; tilingDwellInput.step = '0.1';
         tilingDwellInput.style.cssText = 'width:55px;padding:3px 5px;background:#222;color:#fff;border:1px solid #555;border-radius:3px;font-size:12px;';
@@ -10643,11 +10824,28 @@ class UIManager {
         const updateDuration = () => {
             if (motionSelect.value === 'tiling') {
                 const dwell = parseFloat(tilingDwellInput.value) || 0.5;
-                const nNeurons = this.vis.highlightedSet && this.vis.highlightedSet.size > 0
-                    ? this.vis.highlightedSet.size
-                    : (this.data && this.data.neurons ? this.data.neurons.length : 0);
-                const dur = nNeurons * dwell + 1; // +1s hold at end
-                durationSpan.textContent = `\u2192 ~${dur.toFixed(1)}s (${nNeurons} neurons)`;
+                let nSteps, label;
+                const typeNeurons = this.data.typeNeurons || {};
+                if (tilingOrderSelect.value === 'savedsets') {
+                    nSteps = this._savedSets ? this._savedSets.length : 0;
+                    label = `${nSteps} sets`;
+                } else {
+                    // Count individual neurons (expand type names to body IDs)
+                    const vis = this.vis;
+                    if (vis.highlightedSet && vis.highlightedSet.size > 0) {
+                        let count = 0;
+                        for (const id of vis.highlightedSet) {
+                            if (typeNeurons[id]) count += typeNeurons[id].length;
+                            else count++;
+                        }
+                        nSteps = count;
+                    } else {
+                        nSteps = this.data.neurons ? this.data.neurons.length : 0;
+                    }
+                    label = `${nSteps} neurons`;
+                }
+                const dur = nSteps * dwell + 1;
+                durationSpan.textContent = `\u2192 ~${dur.toFixed(1)}s (${label})`;
                 return;
             }
             const speed = parseFloat(speedInput.value) || 30;
@@ -10708,7 +10906,10 @@ class UIManager {
             const tilingMode = tilingModeSelect.value;
             const tilingOrder = tilingOrderSelect.value;
             const tilingDwell = parseFloat(tilingDwellInput.value) || 0.5;
-            return { speed, isPivot, pivotAngle, axis, center, isTiling, tilingMode, tilingOrder, tilingDwell };
+            const tilingScoreMode = parseInt(scoreSelect.value, 10) || 0;
+            const tilingReverse = reverseChk.checked;
+            const tilingCustomOrder = tilingOrder === 'custom' ? customOrder.slice() : null;
+            return { speed, isPivot, pivotAngle, axis, center, isTiling, tilingMode, tilingOrder, tilingDwell, tilingScoreMode, tilingReverse, tilingCustomOrder };
         };
 
         // Preview button
@@ -10719,14 +10920,22 @@ class UIManager {
             if (this._previewAnimId) {
                 cancelAnimationFrame(this._previewAnimId);
                 this._previewAnimId = null;
-                this._restorePreviewCamera();
+                if (this._tilingPreviewActive) {
+                    this._stopTilingPreview();
+                } else {
+                    this._restorePreviewCamera();
+                }
                 previewBtn.textContent = 'Preview';
                 previewBtn.style.background = '#444';
             } else {
                 previewBtn.textContent = 'Stop';
                 previewBtn.style.background = '#844';
                 const s = getSettings();
-                this._runPreview(s.axis, s.speed, previewBtn, s.center, s.isPivot, s.pivotAngle);
+                if (s.isTiling) {
+                    this._runTilingPreview(s.tilingMode, s.tilingOrder, s.tilingDwell, previewBtn, s.tilingScoreMode, s.tilingReverse, s.tilingCustomOrder);
+                } else {
+                    this._runPreview(s.axis, s.speed, previewBtn, s.center, s.isPivot, s.pivotAngle);
+                }
             }
         };
         btnRow.appendChild(previewBtn);
@@ -10746,9 +10955,9 @@ class UIManager {
             this._videoDialog = null;
             if (s.isTiling) {
                 if (fmtType === 'gif') {
-                    this._recordTilingGif(s.tilingMode, s.tilingOrder, s.tilingDwell);
+                    this._recordTilingGif(s.tilingMode, s.tilingOrder, s.tilingDwell, s.tilingScoreMode, s.tilingReverse, s.tilingCustomOrder);
                 } else {
-                    this._recordTilingAvi(s.tilingMode, s.tilingOrder, s.tilingDwell);
+                    this._recordTilingAvi(s.tilingMode, s.tilingOrder, s.tilingDwell, s.tilingScoreMode, s.tilingReverse, s.tilingCustomOrder);
                 }
                 return;
             }
@@ -10840,6 +11049,55 @@ class UIManager {
         scene.camera.updateMatrixWorld();
         scene.controls.update();
         this._previewSavedPos = null;
+    }
+
+    _runTilingPreview(tilingMode, tilingOrder, dwellSecs, previewBtn, scoreModeIdx, reverse, customOrder) {
+        const vis = this.viewer.vis;
+        const scene = this.viewer.scene;
+        const groups = this._getTilingGroups(tilingOrder, scoreModeIdx, reverse, customOrder);
+        if (groups.length === 0) {
+            previewBtn.textContent = 'Preview';
+            previewBtn.style.background = '#444';
+            return;
+        }
+
+        this._tilingPreviewActive = true;
+        this._tilingPreviewSavedHL = new Set(vis.highlightedSet);
+        this._tilingPreviewSavedClip = Object.assign({}, vis.clipToRoi);
+        this._tilingPreviewSavedHideAll = vis._explicitHideAll;
+
+        scene._recordingActive = true;
+        const dwellMs = dwellSecs * 1000;
+        let groupIdx = 0;
+        let lastStepTime = null;
+
+        const animate = (timestamp) => {
+            if (!lastStepTime) lastStepTime = timestamp;
+            if (timestamp - lastStepTime >= dwellMs) {
+                groupIdx++;
+                if (groupIdx >= groups.length) groupIdx = 0; // loop
+                lastStepTime = timestamp;
+            }
+            this._applyTilingVisibility(vis, tilingMode, groups, groupIdx);
+            scene.renderer.render(scene.scene, scene.camera);
+            scene._captureScaleBar = true; scene._renderScaleBar(); scene._captureScaleBar = false;
+            this._previewAnimId = requestAnimationFrame(animate);
+        };
+        this._previewAnimId = requestAnimationFrame(animate);
+    }
+
+    _stopTilingPreview() {
+        const vis = this.viewer.vis;
+        const scene = this.viewer.scene;
+        scene._recordingActive = false;
+        this._tilingPreviewActive = false;
+        if (this._tilingPreviewSavedHL) {
+            vis.highlightedSet = this._tilingPreviewSavedHL;
+            vis.clipToRoi = this._tilingPreviewSavedClip;
+            vis._explicitHideAll = this._tilingPreviewSavedHideAll;
+            vis._applyAllVisibility();
+            this._tilingPreviewSavedHL = null;
+        }
     }
 
     _recordRotationVideo(axis, degPerSec, fmt, resolution, orbitCenter, totalDeg, pivotAngle) {
@@ -10952,31 +11210,94 @@ class UIManager {
 
     // ── Tiling (neuron reveal) recording ──────────────────────────────────────
 
-    _getTilingNeurons(tilingOrder) {
+    // Returns array-of-arrays (groups). Each group is an array of body ID strings.
+    // Always works at individual neuron granularity — type names are expanded via typeNeurons.
+    // For savedsets, each group is a full set of body IDs. Otherwise each group is [singleBodyId].
+    _getTilingGroups(tilingOrder, scoreModeIdx, reverse, customOrder) {
         const vis = this.viewer.vis;
-        let neurons;
-        if (vis.highlightedSet.size > 0) {
-            neurons = [...vis.highlightedSet];
-        } else {
-            const allNeurons = this.viewer.data.neurons || [];
-            const keys = new Set(allNeurons.map(n => vis.hlModeByNeuron ? String(n.bodyId) : n.type));
-            neurons = [...keys];
+        const data = this.viewer.data;
+        const typeNeurons = data.typeNeurons || {};
+        const neuronType = data.neuronType || {};
+
+        // Helper: expand any mix of type names / body IDs to body ID strings
+        const expandToBodyIds = (ids) => {
+            const result = [];
+            for (const id of ids) {
+                if (typeNeurons[id]) result.push(...typeNeurons[id]);
+                else result.push(String(id));
+            }
+            return result;
+        };
+
+        // Saved sets mode: each saved set is a group (multi-neuron)
+        if (tilingOrder === 'savedsets') {
+            const groups = (this._savedSets || []).map(ss =>
+                expandToBodyIds([...(ss.highlightedSet || [])])
+            );
+            return groups.filter(g => g.length > 0);
         }
+
+        // Custom order: already individual body IDs from the drag list
+        if (tilingOrder === 'custom' && customOrder && customOrder.length > 0) {
+            let neurons = customOrder.slice();
+            if (reverse) neurons.reverse();
+            return neurons.map(n => [n]);
+        }
+
+        // Get source IDs (may be type names or body IDs) and expand to body IDs
+        let sourceIds;
+        if (vis.highlightedSet.size > 0) {
+            sourceIds = [...vis.highlightedSet];
+        } else {
+            sourceIds = [...(data.allTypes || [])];
+        }
+        let neurons = expandToBodyIds(sourceIds);
+
+        // Apply ordering (all comparisons use type name for grouping, body ID for tie-break)
         if (tilingOrder === 'random') {
             for (let i = neurons.length - 1; i > 0; i--) {
                 const j = Math.floor(Math.random() * (i + 1));
                 [neurons[i], neurons[j]] = [neurons[j], neurons[i]];
             }
+        } else if (tilingOrder === 'sidebar') {
+            const allTypes = data.allTypes || [];
+            const typeOrder = {};
+            allTypes.forEach((t, i) => { typeOrder[t] = i; });
+            neurons.sort((a, b) => {
+                const d = (typeOrder[neuronType[a]] ?? 99999) - (typeOrder[neuronType[b]] ?? 99999);
+                return d !== 0 ? d : String(a).localeCompare(String(b));
+            });
+        } else if (tilingOrder === 'score') {
+            const mode = data.colorModes[scoreModeIdx];
+            if (mode && mode.type_values) {
+                const vals = mode.type_values;
+                neurons.sort((a, b) =>
+                    (vals[neuronType[a]] ?? -Infinity) - (vals[neuronType[b]] ?? -Infinity)
+                );
+            }
         } else {
-            neurons.sort((a, b) => String(a).localeCompare(String(b)));
+            // alpha: sort by instance name (matches sidebar display), body ID tie-break
+            const il = data.instanceLookup || {};
+            neurons.sort((a, b) => {
+                const na = il[a] || neuronType[a] || a;
+                const nb = il[b] || neuronType[b] || b;
+                const d = na.localeCompare(nb);
+                return d !== 0 ? d : String(a).localeCompare(String(b));
+            });
         }
-        return neurons;
+
+        if (reverse) neurons.reverse();
+
+        return neurons.map(n => [n]);
     }
 
-    _applyTilingVisibility(vis, tilingMode, neurons, neuronIdx) {
-        const subset = tilingMode === 'cumulative'
-            ? neurons.slice(0, neuronIdx + 1)
-            : [neurons[neuronIdx]];
+    _applyTilingVisibility(vis, tilingMode, groups, groupIdx) {
+        let subset;
+        if (tilingMode === 'cumulative') {
+            subset = groups.slice(0, groupIdx + 1).flat();
+        } else {
+            subset = groups[groupIdx];
+        }
         vis.highlightedSet = new Set(subset);
         vis._explicitHideAll = false;
         const clipMap = {};
@@ -10985,24 +11306,24 @@ class UIManager {
         vis._applyAllVisibility();
     }
 
-    _recordTilingAvi(tilingMode, tilingOrder, dwellSecs) {
+    _recordTilingAvi(tilingMode, tilingOrder, dwellSecs, scoreModeIdx, reverse, customOrder) {
         const vis = this.viewer.vis;
         const scene = this.viewer.scene;
         const renderer = scene.renderer;
         const camera = scene.camera;
         const canvas = scene.canvas;
 
-        const neurons = this._getTilingNeurons(tilingOrder);
-        if (neurons.length === 0) { alert('No neurons to reveal.'); return; }
+        const groups = this._getTilingGroups(tilingOrder, scoreModeIdx, reverse, customOrder);
+        if (groups.length === 0) { alert('No neurons to reveal.'); return; }
 
         const savedHighlighted    = new Set(vis.highlightedSet);
         const savedClipToRoi      = Object.assign({}, vis.clipToRoi);
         const savedExplicitHideAll = vis._explicitHideAll;
 
         const fps = 30;
-        const framesPerNeuron = Math.max(1, Math.ceil(dwellSecs * fps));
+        const framesPerGroup = Math.max(1, Math.ceil(dwellSecs * fps));
         const holdFrames = fps; // 1 s hold on final state
-        const totalFrames = neurons.length * framesPerNeuron + holdFrames;
+        const totalFrames = groups.length * framesPerGroup + holdFrames;
 
         const pr = renderer.getPixelRatio();
         const origW = canvas.clientWidth;
@@ -11042,8 +11363,8 @@ class UIManager {
                 return;
             }
 
-            const neuronIdx = Math.min(Math.floor(frame / framesPerNeuron), neurons.length - 1);
-            this._applyTilingVisibility(vis, tilingMode, neurons, neuronIdx);
+            const groupIdx = Math.min(Math.floor(frame / framesPerGroup), groups.length - 1);
+            this._applyTilingVisibility(vis, tilingMode, groups, groupIdx);
 
             renderer.render(scene.scene, camera);
             scene._captureScaleBar = true; scene._renderScaleBar(); scene._captureScaleBar = false;
@@ -11059,22 +11380,22 @@ class UIManager {
             for (let j = 0; j < raw.length; j++) arr[j] = raw.charCodeAt(j);
             jpegFrames.push(arr);
 
-            badge.textContent = `\u{1F534} Capturing... ${Math.round((frame + 1) / totalFrames * 100)}% (${Math.min(neuronIdx + 1, neurons.length)}/${neurons.length})`;
+            badge.textContent = `\u{1F534} Capturing... ${Math.round((frame + 1) / totalFrames * 100)}% (${Math.min(groupIdx + 1, groups.length)}/${groups.length})`;
             frame++;
             setTimeout(captureFrame, 0);
         };
         captureFrame();
     }
 
-    _recordTilingGif(tilingMode, tilingOrder, dwellSecs) {
+    _recordTilingGif(tilingMode, tilingOrder, dwellSecs, scoreModeIdx, reverse, customOrder) {
         const vis = this.viewer.vis;
         const scene = this.viewer.scene;
         const renderer = scene.renderer;
         const camera = scene.camera;
         const canvas = scene.canvas;
 
-        const neurons = this._getTilingNeurons(tilingOrder);
-        if (neurons.length === 0) { alert('No neurons to reveal.'); return; }
+        const groups = this._getTilingGroups(tilingOrder, scoreModeIdx, reverse, customOrder);
+        if (groups.length === 0) { alert('No neurons to reveal.'); return; }
 
         const savedHighlighted     = new Set(vis.highlightedSet);
         const savedClipToRoi       = Object.assign({}, vis.clipToRoi);
@@ -11088,9 +11409,9 @@ class UIManager {
         const gh = Math.round(h * gifScale);
         const delay = Math.round(1000 / fps);
 
-        const framesPerNeuron = Math.max(1, Math.ceil(dwellSecs * fps));
+        const framesPerGroup = Math.max(1, Math.ceil(dwellSecs * fps));
         const holdFrames = fps; // 1 s hold
-        const totalFrames = neurons.length * framesPerNeuron + holdFrames;
+        const totalFrames = groups.length * framesPerGroup + holdFrames;
 
         const overlay = document.createElement('div');
         overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:9998;pointer-events:none;';
@@ -11119,15 +11440,15 @@ class UIManager {
                 return;
             }
 
-            const neuronIdx = Math.min(Math.floor(frame / framesPerNeuron), neurons.length - 1);
-            this._applyTilingVisibility(vis, tilingMode, neurons, neuronIdx);
+            const groupIdx = Math.min(Math.floor(frame / framesPerGroup), groups.length - 1);
+            this._applyTilingVisibility(vis, tilingMode, groups, groupIdx);
 
             renderer.render(scene.scene, camera);
             scene._captureScaleBar = true; scene._renderScaleBar(); scene._captureScaleBar = false;
             offCtx.drawImage(canvas, 0, 0, gw, gh);
             frames.push(offCtx.getImageData(0, 0, gw, gh));
 
-            badge.textContent = `\u{1F534} Capturing... ${Math.round((frame + 1) / totalFrames * 100)}% (${Math.min(neuronIdx + 1, neurons.length)}/${neurons.length})`;
+            badge.textContent = `\u{1F534} Capturing... ${Math.round((frame + 1) / totalFrames * 100)}% (${Math.min(groupIdx + 1, groups.length)}/${groups.length})`;
             frame++;
             setTimeout(captureFrame, 0);
         };
