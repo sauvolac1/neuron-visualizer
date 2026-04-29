@@ -25,6 +25,7 @@ import re
 import os
 import sys
 import base64
+import hashlib
 import time
 import functools
 from collections import Counter
@@ -82,14 +83,35 @@ NT_COLORS = {
 NT_DEFAULT_COLOR = 'rgb(140,140,140)'
 
 BRAIN_NEUROPILS = [
+    # Superior / lateral protocerebrum
     'SMP(L)', 'SMP(R)', 'SLP(L)', 'SLP(R)', 'SIP(L)', 'SIP(R)',
-    'CRE(L)', 'CRE(R)', 'FB', 'EB', 'PB', 'NO', 'LH(L)', 'LH(R)',
-    'AL(L)', 'AL(R)', 'AVLP(L)', 'AVLP(R)', 'PVLP(L)', 'PVLP(R)',
-    'GNG', 'LAL(L)', 'LAL(R)', 'IB', 'ICL(L)', 'ICL(R)',
-    'ME(L)', 'ME(R)', 'LO(L)', 'LO(R)', 'LOP(L)', 'LOP(R)',
-    'aL(L)', 'aL(R)', 'gL(L)', 'gL(R)', 'PLP(L)', 'PLP(R)',
-    'SCL(L)', 'SCL(R)', 'CA(L)', 'CA(R)', 'PED(L)', 'PED(R)',
-    'WED(L)', 'WED(R)', 'EPA(L)', 'EPA(R)', 'IPS(L)', 'IPS(R)',
+    'SCL(L)', 'SCL(R)', 'SPS(L)', 'SPS(R)',
+    # Inferior protocerebrum / lateral horn
+    'LH(L)', 'LH(R)', 'IB', 'ICL(L)', 'ICL(R)', 'IPS(L)', 'IPS(R)',
+    'CRE(L)', 'CRE(R)', 'ATL(L)', 'ATL(R)', 'PLP(L)', 'PLP(R)',
+    # Central complex
+    'FB', 'EB', 'PB', 'NO', 'AB(L)', 'AB(R)',
+    # Lateral complex
+    'BU(L)', 'BU(R)', 'GA(L)', 'GA(R)', 'LAL(L)', 'LAL(R)',
+    # Mushroom body
+    'CA(L)', 'CA(R)', 'PED(L)', 'PED(R)',
+    'aL(L)', 'aL(R)', "a'L(L)", "a'L(R)",
+    'bL(L)', 'bL(R)', "b'L(L)", "b'L(R)", 'gL(L)', 'gL(R)',
+    # Antennal lobes / olfactory
+    'AL(L)', 'AL(R)',
+    # Visual / optic lobe
+    'ME(L)', 'ME(R)', 'AME(L)', 'AME(R)',
+    'LO(L)', 'LO(R)', 'LOP(L)', 'LOP(R)', 'LA(L)', 'LA(R)',
+    'AOTU(L)', 'AOTU(R)', 'Optic-unspecified(L)', 'Optic-unspecified(R)',
+    # Ventrolateral / mech-acoustic
+    'AVLP(L)', 'AVLP(R)', 'PVLP(L)', 'PVLP(R)',
+    'AMMC(L)', 'AMMC(R)', 'WED(L)', 'WED(R)',
+    # Peri-esophageal / saddle / gnathal
+    'GNG', 'SAD', 'PRW',
+    'EPA(L)', 'EPA(R)', 'VES(L)', 'VES(R)', 'GOR(L)', 'GOR(R)',
+    'CAN(L)', 'CAN(R)', 'FLA(L)', 'FLA(R)',
+    # Catch-alls (silently skipped if not present in dataset)
+    'CentralBrain-unspecified',
 ]
 
 ALL_PATTERNS = [
@@ -1273,6 +1295,91 @@ def _decimate_anchor(verts, faces, max_faces):
     return verts, faces
 
 
+_BRAIN_ANCHOR_CACHE_VERSION = 2  # Bump if format/decimation/ROI list changes
+
+
+def _brain_anchor_cache_path(server, dataset):
+    """Disk cache path for whole-brain anchor mesh data, keyed by server+dataset."""
+    safe = hashlib.md5(f"{server}|{dataset}".encode()).hexdigest()[:10]
+    cache_dir = Path(__file__).resolve().parent / '.brain_anchor_cache'
+    cache_dir.mkdir(exist_ok=True)
+    return cache_dir / f"{dataset}_{safe}_v{_BRAIN_ANCHOR_CACHE_VERSION}.npz"
+
+
+def fetch_brain_anchor_meshes(server='neuprint.janelia.org', dataset='cns',
+                              max_faces=ANCHOR_MAX_FACES):
+    """Fetch low-res meshes for all BRAIN_NEUROPILS, used for the
+    'Show entire brain' and 'Cartoon outline' rendering modes in the JS viewer.
+
+    Each mesh is decimated to ~max_faces faces. Total bundle addition:
+    ~88 ROIs x ~200 faces ~= small.
+
+    Cached to disk so subsequent runs of the same dataset are instant.
+
+    Returns:
+        {roi_name: {'vertices': np.ndarray (flat float64),
+                    'faces':    np.ndarray (flat int64)}}
+        or {} if neuPrint is unavailable.
+    """
+    cache_path = _brain_anchor_cache_path(server, dataset)
+    if cache_path.exists():
+        try:
+            data = np.load(cache_path, allow_pickle=False)
+            names = data['names'].tolist()
+            out = {}
+            for i, nm in enumerate(names):
+                out[str(nm)] = {
+                    'vertices': data[f'v{i}'],
+                    'faces':    data[f'f{i}'],
+                }
+            print(f"  Loaded {len(out)} brain anchor meshes from cache "
+                  f"({cache_path.name})")
+            return out
+        except Exception as e:
+            print(f"  Brain anchor cache load failed ({e}), refetching...")
+
+    print(f"  Fetching {len(BRAIN_NEUROPILS)} brain anchor meshes "
+          f"(decimating to ~{max_faces} faces each)...")
+    out = {}
+    for roi in BRAIN_NEUROPILS:
+        try:
+            vol = neu.fetch_roi(roi)
+        except Exception:
+            continue
+        try:
+            tm = tm_lib.Trimesh(vertices=vol.vertices, faces=vol.faces)
+            if len(tm.faces) > max_faces:
+                try:
+                    tm = tm.simplify_quadric_decimation(max_faces)
+                except Exception:
+                    pass
+            verts = tm.vertices.astype(np.float64).ravel()
+            faces = tm.faces.astype(np.int64).ravel()
+        except Exception:
+            # Last resort: stride-decimation
+            v = vol.vertices.astype(np.float64)
+            f = vol.faces.astype(np.int64)
+            v2, f2 = _decimate_anchor(v, f, max_faces)
+            verts = v2.ravel()
+            faces = f2.ravel()
+        out[roi] = {'vertices': verts, 'faces': faces}
+
+    print(f"    Got {len(out)}/{len(BRAIN_NEUROPILS)} brain anchor meshes")
+
+    # Save cache
+    try:
+        save_args = {'names': np.array(list(out.keys()))}
+        for i, (_, m) in enumerate(out.items()):
+            save_args[f'v{i}'] = m['vertices']
+            save_args[f'f{i}'] = m['faces']
+        np.savez_compressed(cache_path, **save_args)
+        print(f"    Cached to {cache_path.name}")
+    except Exception as e:
+        print(f"    Cache write failed: {e}")
+
+    return out
+
+
 # Pre-computed brain bounding box for CNS dataset (fallback if no ROI data available).
 _CNS_BRAIN_BBOX = {
     'xmin': 5798, 'xmax': 90473,
@@ -1357,6 +1464,7 @@ def build_data_bundle(
     neuron_upstream, neuron_downstream,
     norm_params, regex_term='', neuron_meshes=None,
     _data_source=None, voxel_size_nm=8,
+    brain_anchor_meshes=None,
 ):
     """Build the Three.js data bundle directly from navis objects."""
 
@@ -1476,6 +1584,7 @@ def build_data_bundle(
         'neuronFullSegments': neuron_full_segments,
         'neuronSomas': neuron_somas,
         'roiMeshes': roi_meshes,
+        'brainAnchorMeshes': brain_anchor_meshes or {},
         'roiBounds': roi_bounds,
         'normParams': norm_params,
         'camera': _compute_default_camera(norm_params),
@@ -1596,6 +1705,28 @@ def optimize_bundle(bundle):
         opt_meshes[roi_name] = {'v': v_b64, 'f': f_b64, 'fd': f_dtype}
     bundle['roiMeshes'] = opt_meshes
 
+    # Optimize brainAnchorMeshes (same scheme as roiMeshes; safe if absent/empty)
+    if bundle.get('brainAnchorMeshes'):
+        print("  Optimizing brainAnchorMeshes...")
+        opt_anchors = {}
+        for roi_name, mesh_data in bundle['brainAnchorMeshes'].items():
+            verts = mesh_data['vertices']
+            faces = mesh_data['faces']
+            if len(verts) == 0 or len(faces) == 0:
+                continue
+            v_b64 = normalize_and_encode(verts)
+            face_arr = faces if isinstance(faces, np.ndarray) else np.array(faces, dtype=np.int64)
+            max_idx = int(face_arr.max()) if len(face_arr) > 0 else 0
+            if max_idx < 65536:
+                f_arr = face_arr.astype(np.uint16)
+                f_dtype = 'u2'
+            else:
+                f_arr = face_arr.astype(np.uint32)
+                f_dtype = 'u4'
+            f_b64 = base64.b64encode(f_arr.tobytes()).decode('ascii')
+            opt_anchors[roi_name] = {'v': v_b64, 'f': f_b64, 'fd': f_dtype}
+        bundle['brainAnchorMeshes'] = opt_anchors
+
     print("  Pre-normalizing somas and roiBounds...")
     for bid, pos in bundle['neuronSomas'].items():
         bundle['neuronSomas'][bid] = {
@@ -1660,59 +1791,21 @@ def _prepare_js_libs(threejs_path=None, controls_path=None, trackball_path=None)
     return threejs_src, imports_line, controls_adapted, tb_imports_line, trackball_adapted
 
 
-def build_threejs_html(bundle, output_path, threejs_path=None,
-                       controls_path=None, trackball_path=None):
-    """Build the standalone Three.js HTML file."""
-    if threejs_path is None:
-        threejs_path = str(SCRIPT_DIR / 'three.min.js')
-    if controls_path is None:
-        controls_path = str(SCRIPT_DIR / 'OrbitControls.js')
-    if trackball_path is None:
-        trackball_path = str(SCRIPT_DIR / 'TrackballControls.js')
+def _render_html_template(data_json, title=''):
+    """Render the standalone Three.js HTML wrapper given a JSON DATA string.
 
-    def _read_cached(path):
-        if path not in _JS_CACHE:
-            with open(path, 'r', encoding='utf-8') as f:
-                _JS_CACHE[path] = f.read()
-        return _JS_CACHE[path]
-
-    threejs_src = _read_cached(threejs_path)
-    controls_src = _read_cached(controls_path)
-    trackball_src = _read_cached(trackball_path)
-
-    data_json = json.dumps(bundle, separators=(',', ':'))
+    Single source of truth for the HTML/CSS shell — used by both
+    build_threejs_html (full pipeline) and patch_htmls.py (JS-only patches).
+    """
+    threejs_src, imports_line, controls_adapted, tb_imports_line, trackball_adapted = _prepare_js_libs()
     app_js = APPLICATION_JS
     logo_tag = f'<img id="_loadLogo" src="data:image/png;base64,{LOADING_LOGO_B64}">' if LOADING_LOGO_B64 else ''
 
-    # Adapt OrbitControls for inline use
-    import_block_end = controls_src.find("from 'three';")
-    if import_block_end > 0:
-        controls_adapted = controls_src[import_block_end + len("from 'three';"):]
-    else:
-        controls_adapted = controls_src
-
-    imported_names = ['EventDispatcher', 'MOUSE', 'Quaternion', 'Spherical', 'TOUCH',
-                      'Vector2', 'Vector3', 'Plane', 'Ray', 'MathUtils']
-    imports_line = '\n'.join(f'const {name} = THREE.{name};' for name in imported_names)
-    controls_adapted = controls_adapted.replace(
-        'export { OrbitControls };', 'THREE.OrbitControls = OrbitControls;')
-
-    # Adapt TrackballControls
-    tb_import_end = trackball_src.find("from 'three';")
-    if tb_import_end > 0:
-        trackball_adapted = trackball_src[tb_import_end + len("from 'three';"):]
-    else:
-        trackball_adapted = trackball_src
-    tb_imported_names = ['EventDispatcher', 'MathUtils', 'MOUSE', 'Quaternion', 'Vector2', 'Vector3']
-    tb_imports_line = '\n'.join(f'const {name} = THREE.{name};' for name in tb_imported_names)
-    trackball_adapted = trackball_adapted.replace(
-        'export { TrackballControls };', 'THREE.TrackballControls = TrackballControls;')
-
-    html = f"""<!DOCTYPE html>
+    return f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>3D Neuron Visualizer — {bundle.get('regexTerm','')}</title>
+<title>CHUCC-E — {title}</title>
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{ background: #000; overflow: hidden; font-family: sans-serif; color: #fff; }}
@@ -1724,11 +1817,13 @@ body {{ background: #000; overflow: hidden; font-family: sans-serif; color: #fff
 #_loadSpinner {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 4px solid #333; border-top-color: rgb(212,160,23); border-radius: 50%; animation: _spin 1s linear infinite; box-sizing: border-box; }}
 @keyframes _spin {{ to {{ transform: rotate(360deg); }} }}
 #_loadLogo {{ position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 130px; height: auto; object-fit: contain; }}
+#_loadTitle {{ font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 38px; font-weight: 700; letter-spacing: 0.08em; color: rgb(212,160,23); margin-bottom: 4px; }}
+#_loadTagline {{ font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 13px; color: #aaa; letter-spacing: 0.04em; margin-bottom: 32px; text-align: center; max-width: 620px; padding: 0 20px; }}
 #_loadLabel {{ margin-top: 16px; color: #888; font-size: 14px; }}
 </style>
 </head>
 <body>
-<div id="_loadScreen"><div id="_loadWrap"><div id="_loadSpinner"></div>{logo_tag}</div><div id="_loadLabel">Getting things sorted...</div></div>
+<div id="_loadScreen"><div id="_loadTitle">CHUCC-E</div><div id="_loadTagline">Connectome Hypertext Utility for Custom Colorization and Export</div><div id="_loadWrap"><div id="_loadSpinner"></div>{logo_tag}</div><div id="_loadLabel">Getting things sorted...</div></div>
 <script>
 // === THREE.JS LIBRARY ===
 {threejs_src}
@@ -1756,6 +1851,13 @@ const DATA = {data_json};
 </script>
 </body>
 </html>"""
+
+
+def build_threejs_html(bundle, output_path, threejs_path=None,
+                       controls_path=None, trackball_path=None):
+    """Build the standalone Three.js HTML file."""
+    data_json = json.dumps(bundle, separators=(',', ':'))
+    html = _render_html_template(data_json, title=bundle.get('regexTerm', ''))
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(html)
@@ -1831,6 +1933,10 @@ def generate_visualization(pattern, continuous_csvs=None, categorical_csvs=None,
     neurons_clipped, roi_clipped = clip_skeletons(
         neurons_full, roi_volumes, primary_roi, roi_neuron_bids)
 
+    # 5b. Whole-brain anchor meshes (cached) — drives "Show entire brain"
+    # and "Cartoon outline" rendering modes in the JS viewer.
+    brain_anchor_meshes = fetch_brain_anchor_meshes(server=server, dataset=dataset)
+
     # 6. Compute brain bounding box
     print("Computing brain bounding box...")
     norm_params = build_anchor_bbox(roi_volumes, neurons_full=neurons_full, dataset=dataset)
@@ -1905,6 +2011,7 @@ def generate_visualization(pattern, continuous_csvs=None, categorical_csvs=None,
         norm_params, regex_term=regex_term,
         neuron_meshes=neuron_meshes,
         voxel_size_nm=voxel_size_nm,
+        brain_anchor_meshes=brain_anchor_meshes,
         _data_source={'server': server or 'neuprint.janelia.org',
                       'dataset': dataset or 'cns'},
     )
@@ -2529,13 +2636,21 @@ class SceneManager {
         this.typeRoiGeom = new Map();   // "type|roi" -> THREE.LineSegments
         this.neuronFullGeom = new Map(); // bodyId -> THREE.LineSegments
         this.roiMeshGeom = new Map();    // roiName -> THREE.Mesh
+        this.brainAnchorMeshGeom = new Map();  // roiName -> THREE.Mesh (whole-brain anchor)
         this.somaGeom = new Map();       // bodyId -> THREE.Mesh
 
         // Groups for scene organization
         this.neuronGroup = null;
         this.fullGroup = null;
         this.roiGroup = null;
+        this.brainAnchorGroup = null;
         this.somaGroup = null;
+
+        // "Show entire brain" / "Cartoon outline" mode state
+        this._showWholeBrain = false;
+        this._outlineMode = false;
+        this._outlineThickness = 1.5;  // Pixel offset for edge-detect sampling
+        this._silhouettePipeline = null;  // Lazy-initialized on first outline render
 
         // GPU picking infrastructure
         this._pickScene = null;
@@ -2655,6 +2770,11 @@ class SceneManager {
         this.roiGroup.name = 'rois';
         this.scene.add(this.roiGroup);
 
+        this.brainAnchorGroup = new THREE.Group();
+        this.brainAnchorGroup.name = 'brainAnchors';
+        this.brainAnchorGroup.visible = false;  // Hidden until "Show entire brain" toggle
+        this.scene.add(this.brainAnchorGroup);
+
         this.somaGroup = new THREE.Group();
         this.somaGroup.name = 'somas';
         this.scene.add(this.somaGroup);
@@ -2676,6 +2796,7 @@ class SceneManager {
         this._buildFullGeometries();
         this._computeBidRuns();
         this._buildROIMeshes();
+        this._buildBrainAnchorMeshes();
         this._buildSomas();
         if (this._meshesAvailable) this._buildNeuronMeshes();
         this._buildPickScene();
@@ -2969,6 +3090,251 @@ class SceneManager {
         }
 
         console.log(`Built ${count} ROI meshes`);
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Whole-brain anchor meshes ("Show entire brain" + "Cartoon outline")
+    // ────────────────────────────────────────────────────────────────────
+    _buildBrainAnchorMeshes() {
+        const meshes = this.data.raw.brainAnchorMeshes;
+        if (!meshes || Object.keys(meshes).length === 0) {
+            console.log('No brainAnchorMeshes in bundle (regenerate to enable whole-brain features)');
+            this._brainAnchorAvailable = false;
+            return;
+        }
+        const isBinary = !!this.data.raw.encoding;
+        const qScale = this.data.raw.quantScale || 30000;
+        let count = 0;
+
+        for (const [roiName, meshData] of Object.entries(meshes)) {
+            let positions, faceIndices;
+
+            if (isBinary && typeof meshData.v === 'string') {
+                positions = decodeInt16(meshData.v, qScale);
+                if (meshData.fd === 'u2') {
+                    faceIndices = new THREE.BufferAttribute(decodeUint16(meshData.f), 1);
+                } else {
+                    faceIndices = new THREE.BufferAttribute(decodeUint32(meshData.f), 1);
+                }
+            } else {
+                const verts = meshData.vertices;
+                positions = new Float32Array(verts.length);
+                for (let i = 0; i < verts.length; i += 3) {
+                    const [nx, ny, nz] = this._normalize(verts[i], verts[i+1], verts[i+2]);
+                    positions[i] = nx;
+                    positions[i+1] = ny;
+                    positions[i+2] = nz;
+                }
+                faceIndices = meshData.faces;
+            }
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setIndex(faceIndices);
+            geometry.computeVertexNormals();
+
+            const material = new THREE.MeshBasicMaterial({
+                color: 0xcccccc,
+                transparent: true,
+                opacity: 0.06,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.userData = { roi: roiName, kind: 'brain_anchor' };
+            mesh.visible = true;  // group itself starts hidden; per-mesh always visible
+
+            this.brainAnchorGroup.add(mesh);
+            this.brainAnchorMeshGeom.set(roiName, mesh);
+            count++;
+        }
+
+        this._brainAnchorAvailable = true;
+        console.log(`Built ${count} brain anchor meshes`);
+    }
+
+    setShowWholeBrain(on) {
+        this._showWholeBrain = !!on;
+        if (this.brainAnchorGroup) {
+            // Glassy whole-brain only renders when not in outline mode
+            // (outline mode draws its own silhouette pass instead).
+            this.brainAnchorGroup.visible = this._showWholeBrain && !this._outlineMode;
+        }
+    }
+
+    setOutlineMode(on) {
+        this._outlineMode = !!on;
+        // In outline mode, glassy whole-brain is hidden (silhouette draws separately).
+        if (this.brainAnchorGroup) {
+            this.brainAnchorGroup.visible = this._showWholeBrain && !this._outlineMode;
+        }
+    }
+
+    setOutlineThickness(px) {
+        const v = Math.max(0.1, Math.min(20.0, parseFloat(px) || 1.5));
+        this._outlineThickness = v;
+        if (this._silhouettePipeline) {
+            this._silhouettePipeline.edgeShader.uniforms.thickness.value = v;
+        }
+    }
+
+    _initSilhouettePipeline() {
+        if (this._silhouettePipeline) return this._silhouettePipeline;
+
+        const w = Math.max(2, Math.floor(this.canvas.clientWidth || window.innerWidth));
+        const h = Math.max(2, Math.floor(this.canvas.clientHeight || (window.innerHeight - TOP_BAR_H)));
+        const pr = this.renderer.getPixelRatio();
+        const target = new THREE.WebGLRenderTarget(w * pr, h * pr, {
+            minFilter: THREE.NearestFilter,
+            magFilter: THREE.NearestFilter,
+            format: THREE.RGBAFormat,
+            type: THREE.UnsignedByteType,
+            depthBuffer: true,
+            stencilBuffer: false,
+        });
+
+        // Solid-fill: pixels inside silhouette = 1.0, outside = 0.0.
+        const fillMaterial = new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            side: THREE.DoubleSide,
+            transparent: false,
+            depthTest: true,
+            depthWrite: true,
+        });
+
+        const edgeShader = new THREE.ShaderMaterial({
+            uniforms: {
+                tFill: { value: target.texture },
+                resolution: { value: new THREE.Vector2(w * pr, h * pr) },
+                outlineColor: { value: new THREE.Color(0x202020) },
+                thickness: { value: this._outlineThickness || 1.5 },
+            },
+            vertexShader: [
+                'varying vec2 vUv;',
+                'void main() {',
+                '  vUv = uv;',
+                '  gl_Position = vec4(position.xy, 0.0, 1.0);',
+                '}'
+            ].join('\n'),
+            fragmentShader: [
+                'uniform sampler2D tFill;',
+                'uniform vec2 resolution;',
+                'uniform vec3 outlineColor;',
+                'uniform float thickness;',
+                'varying vec2 vUv;',
+                'void main() {',
+                '  vec2 px = thickness / resolution;',
+                '  float c  = texture2D(tFill, vUv).r;',
+                '  float n  = texture2D(tFill, vUv + vec2(0.0,  px.y)).r;',
+                '  float s  = texture2D(tFill, vUv - vec2(0.0,  px.y)).r;',
+                '  float e  = texture2D(tFill, vUv + vec2(px.x, 0.0)).r;',
+                '  float w  = texture2D(tFill, vUv - vec2(px.x, 0.0)).r;',
+                '  float ne = texture2D(tFill, vUv + vec2(px.x,  px.y)).r;',
+                '  float nw = texture2D(tFill, vUv + vec2(-px.x, px.y)).r;',
+                '  float se = texture2D(tFill, vUv + vec2(px.x, -px.y)).r;',
+                '  float sw = texture2D(tFill, vUv + vec2(-px.x,-px.y)).r;',
+                '  float total = abs(c-n) + abs(c-s) + abs(c-e) + abs(c-w)',
+                '              + 0.7 * (abs(c-ne) + abs(c-nw) + abs(c-se) + abs(c-sw));',
+                '  if (total < 0.25) discard;',
+                '  gl_FragColor = vec4(outlineColor, 1.0);',
+                '}'
+            ].join('\n'),
+            transparent: true,
+            depthTest: false,
+            depthWrite: false,
+        });
+
+        // Fullscreen triangle (more efficient than a quad)
+        const quadGeom = new THREE.BufferGeometry();
+        quadGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
+            -1, -1, 0,  3, -1, 0,  -1, 3, 0,
+        ]), 3));
+        quadGeom.setAttribute('uv', new THREE.BufferAttribute(new Float32Array([
+            0, 0,  2, 0,  0, 2,
+        ]), 2));
+        const quad = new THREE.Mesh(quadGeom, edgeShader);
+        quad.frustumCulled = false;
+
+        const quadScene = new THREE.Scene();
+        quadScene.add(quad);
+        const quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+        this._silhouettePipeline = {
+            target, fillMaterial, edgeShader, quadScene, quadCamera, quad,
+        };
+        return this._silhouettePipeline;
+    }
+
+    _resizeSilhouetteTarget() {
+        if (!this._silhouettePipeline) return;
+        const w = Math.max(2, Math.floor(this.canvas.clientWidth || window.innerWidth));
+        const h = Math.max(2, Math.floor(this.canvas.clientHeight || (window.innerHeight - TOP_BAR_H)));
+        const pr = this.renderer.getPixelRatio();
+        const tw = w * pr, th = h * pr;
+        const t = this._silhouettePipeline.target;
+        if (t.width !== tw || t.height !== th) {
+            t.setSize(tw, th);
+            this._silhouettePipeline.edgeShader.uniforms.resolution.value.set(tw, th);
+        }
+    }
+
+    _renderSilhouette() {
+        const pipe = this._initSilhouettePipeline();
+        this._resizeSilhouetteTarget();
+
+        // Source meshes for the silhouette fill:
+        // - Whole-brain mode: all bundled brain anchor meshes (all 88).
+        // - Otherwise: roiGroup meshes whose own .visible flag is true (i.e. user-checked).
+        let sourceMeshes;
+        if (this._showWholeBrain && this.brainAnchorMeshGeom.size > 0) {
+            sourceMeshes = Array.from(this.brainAnchorMeshGeom.values());
+        } else {
+            sourceMeshes = Array.from(this.roiMeshGeom.values()).filter(m => m.visible);
+        }
+        if (sourceMeshes.length === 0) return;
+
+        // Theme-aware outline color.
+        let isLight = false;
+        try {
+            isLight = (typeof THEMES !== 'undefined' && typeof _currentTheme !== 'undefined'
+                       && _currentTheme === THEMES.light);
+        } catch (e) { /* ignore */ }
+        pipe.edgeShader.uniforms.outlineColor.value.setHex(isLight ? 0x222222 : 0xdddddd);
+
+        // 1. Render fill into the silhouette target.
+        const prevTarget = this.renderer.getRenderTarget();
+        const prevClearColor = new THREE.Color();
+        this.renderer.getClearColor(prevClearColor);
+        const prevAlpha = this.renderer.getClearAlpha();
+        const prevAutoClear = this.renderer.autoClear;
+
+        // Reparent source meshes to a temp scene with override material.
+        // Avoids touching the main scene's structure.
+        const tempScene = new THREE.Scene();
+        tempScene.overrideMaterial = pipe.fillMaterial;
+        const originalParents = sourceMeshes.map(m => m.parent);
+        for (const m of sourceMeshes) tempScene.add(m);
+
+        this.renderer.setRenderTarget(pipe.target);
+        this.renderer.setClearColor(0x000000, 0);
+        this.renderer.autoClear = true;
+        this.renderer.clear(true, true, false);
+        this.renderer.render(tempScene, this.camera);
+
+        // Restore parents.
+        for (let i = 0; i < sourceMeshes.length; i++) {
+            const p = originalParents[i];
+            if (p) p.add(sourceMeshes[i]);
+        }
+        tempScene.overrideMaterial = null;
+
+        // 2. Composite edge-detect quad over the main framebuffer.
+        this.renderer.setRenderTarget(prevTarget);
+        this.renderer.setClearColor(prevClearColor, prevAlpha);
+        this.renderer.autoClear = false;  // preserve main render
+        this.renderer.render(pipe.quadScene, pipe.quadCamera);
+        this.renderer.autoClear = prevAutoClear;
     }
 
     clipMeshToRois(bid, checkedRois) {
@@ -3336,7 +3702,23 @@ class SceneManager {
             this.clipPlane.setFromNormalAndCoplanarPoint(this._clipDir, this._clipPoint);
         }
 
-        this.renderer.render(this.scene, this.camera);
+        if (this._outlineMode) {
+            // Hide all glassy brain meshes for the main pass; the silhouette
+            // overlay then draws their outline. Per-mesh .visible flags are
+            // preserved so the silhouette source-picking still works.
+            const savedRoiVis = this.roiGroup.visible;
+            const savedAnchorVis = this.brainAnchorGroup ? this.brainAnchorGroup.visible : false;
+            this.roiGroup.visible = false;
+            if (this.brainAnchorGroup) this.brainAnchorGroup.visible = false;
+
+            this.renderer.render(this.scene, this.camera);
+            this._renderSilhouette();
+
+            this.roiGroup.visible = savedRoiVis;
+            if (this.brainAnchorGroup) this.brainAnchorGroup.visible = savedAnchorVis;
+        } else {
+            this.renderer.render(this.scene, this.camera);
+        }
         this._renderScaleBar();
     }
 
@@ -3910,6 +4292,10 @@ class SessionManager {
             },
             clipEnabled: scene.clipEnabled || false,
             clipFraction: scene.clipFraction || 0,
+            // Whole-brain / outline mode
+            showWholeBrain: !!scene._showWholeBrain,
+            outlineMode: !!scene._outlineMode,
+            outlineThickness: scene._outlineThickness || 1.5,
             // Saved banks
             savedViews: (ui._savedViews || []).map(v => ({
                 pos: v.pos, tgt: v.tgt, up: v.up,
@@ -4081,6 +4467,23 @@ class SessionManager {
             scene.camera.up.set(u.x, u.y, u.z);
             scene.controls.target.set(t.x, t.y, t.z);
             scene.controls.update();
+        }
+
+        // 8b. Restore whole-brain / outline toggles
+        if (s.showWholeBrain) {
+            scene.setShowWholeBrain(true);
+            if (ui._wholeBrainToggle && ui._wholeBrainToggle._setState)
+                ui._wholeBrainToggle._setState(true);
+        }
+        if (s.outlineMode) {
+            scene.setOutlineMode(true);
+            if (ui._outlineToggle && ui._outlineToggle._setState)
+                ui._outlineToggle._setState(true);
+            if (ui._outlineWidthWrap) ui._outlineWidthWrap.style.display = 'flex';
+        }
+        if (typeof s.outlineThickness === 'number') {
+            scene.setOutlineThickness(s.outlineThickness);
+            if (ui._outlineWidthSlider) ui._outlineWidthSlider.value = String(s.outlineThickness);
         }
 
         // 9. Restore saved view/set banks
@@ -5377,8 +5780,8 @@ class UIManager {
         rightGroup.appendChild(zDivider);
 
         const zLabel = document.createElement('span');
-        zLabel.textContent = 'Z-section:';
-        zLabel.style.cssText = 'font-size:14px;font-weight:bold;color:#fff;white-space:nowrap;';
+        zLabel.textContent = 'Z-section';
+        zLabel.style.cssText = 'font-size:15px;font-weight:bold;color:#fff;white-space:nowrap;flex-shrink:0;';
         rightGroup.appendChild(zLabel);
 
         const zSlider = document.createElement('input');
@@ -5387,13 +5790,13 @@ class UIManager {
         zSlider.max = '100';
         zSlider.step = '1';
         zSlider.value = '0';
-        zSlider.style.cssText = 'width:100px;';
+        zSlider.style.cssText = 'width:120px;flex-shrink:0;accent-color:rgb(212,160,23);';
         this._zSlider = zSlider;
         rightGroup.appendChild(zSlider);
 
         const zVal = document.createElement('span');
         zVal.textContent = 'Off';
-        zVal.style.cssText = 'font-size:12px;color:#ccc;width:30px;';
+        zVal.style.cssText = 'font-size:13px;color:#ccc;width:42px;flex-shrink:0;text-align:left;';
         this._zVal = zVal;
         rightGroup.appendChild(zVal);
 
@@ -7419,6 +7822,88 @@ class UIManager {
             stickyHdr.appendChild(lightWrap);
         }
 
+        // ── Cartoon outline / Outline width / Show entire brain ───────────────
+        // Disabled (greyed) if the bundle has no brain anchor meshes
+        // (legacy HTML — regenerate to enable).
+        const _brainAvail = !!this.viewer.scene._brainAnchorAvailable;
+
+        const makeToggle = (labelText, initial, onChange, disabled) => {
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;'
+                + (disabled ? 'opacity:0.45;cursor:not-allowed;' : '');
+            const lab = document.createElement('span');
+            lab.textContent = labelText;
+            lab.style.cssText = 'font-size:15px;font-weight:bold;color:#fff;';
+            wrap.appendChild(lab);
+            const sw = document.createElement('div');
+            const onColor = GOLD;
+            const offColor = '#555';
+            sw.style.cssText = `position:relative;width:40px;height:20px;background:${initial ? onColor : offColor};border-radius:10px;cursor:${disabled ? 'not-allowed' : 'pointer'};`;
+            const thumb = document.createElement('div');
+            thumb.style.cssText = `position:absolute;top:2px;left:${initial ? '20px' : '2px'};width:16px;height:16px;background:#fff;border-radius:50%;transition:left 0.2s;`;
+            sw.appendChild(thumb);
+            sw.onclick = () => {
+                if (disabled) return;
+                const wasOn = thumb.style.left === '20px';
+                const nowOn = !wasOn;
+                thumb.style.left = nowOn ? '20px' : '2px';
+                sw.style.background = nowOn ? onColor : offColor;
+                onChange(nowOn);
+            };
+            wrap.appendChild(sw);
+            wrap._setState = (on) => {
+                thumb.style.left = on ? '20px' : '2px';
+                sw.style.background = on ? onColor : offColor;
+            };
+            if (disabled) wrap.title = 'Regenerate this HTML to enable whole-brain features';
+            return wrap;
+        };
+
+        // Cartoon outline toggle (defined before width wrap so the toggle
+        // callback can show/hide the width slider).
+        const outlineToggle = makeToggle('Cartoon outline', false, (on) => {
+            this.viewer.scene.setOutlineMode(on);
+            if (this._outlineWidthWrap) this._outlineWidthWrap.style.display = on ? 'flex' : 'none';
+            if (this.viewer.session) this.viewer.session.debouncedSave();
+        }, !_brainAvail);
+        stickyHdr.appendChild(outlineToggle);
+        this._outlineToggle = outlineToggle;
+
+        // Outline width slider — hidden until Cartoon outline is enabled.
+        const widthWrap = document.createElement('div');
+        widthWrap.style.cssText = 'margin-bottom:12px;display:none;align-items:center;gap:6px;overflow:hidden;'
+            + (_brainAvail ? '' : 'opacity:0.45;');
+        const widthLabel = document.createElement('span');
+        widthLabel.textContent = 'Outline width';
+        widthLabel.style.cssText = 'font-size:15px;font-weight:bold;color:#fff;flex-shrink:0;';
+        widthWrap.appendChild(widthLabel);
+        const widthSlider = document.createElement('input');
+        widthSlider.type = 'range';
+        widthSlider.min = '0.5';
+        widthSlider.max = '6.0';
+        widthSlider.step = '0.1';
+        widthSlider.value = String(this.viewer.scene._outlineThickness || 1.5);
+        widthSlider.style.cssText = `flex:1;min-width:0;max-width:100%;accent-color:${GOLD};`;
+        if (!_brainAvail) widthSlider.disabled = true;
+        widthSlider.oninput = () => {
+            const v = parseFloat(widthSlider.value);
+            this.viewer.scene.setOutlineThickness(v);
+            if (this.viewer.session) this.viewer.session.debouncedSave();
+        };
+        widthWrap.appendChild(widthSlider);
+        stickyHdr.appendChild(widthWrap);
+        this._outlineWidthSlider = widthSlider;
+        this._outlineWidthWrap = widthWrap;
+
+        // Show entire brain toggle (kept for parity; controls glassy whole-brain
+        // when Cartoon outline is off, and silhouette source when it's on)
+        const wholeBrainToggle = makeToggle('Show entire brain', false, (on) => {
+            this.viewer.scene.setShowWholeBrain(on);
+            if (this.viewer.session) this.viewer.session.debouncedSave();
+        }, !_brainAvail);
+        stickyHdr.appendChild(wholeBrainToggle);
+        this._wholeBrainToggle = wholeBrainToggle;
+
         // Show ROI Bounds toggle
         const toggleWrap = document.createElement('div');
         toggleWrap.style.cssText = 'margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;';
@@ -8684,9 +9169,9 @@ class UIManager {
 
         // Semi-transparent brain shell — front-face only so back faces naturally dissolve
         const material = new THREE.MeshLambertMaterial({
-            color: 0xd4a017,
+            color: 0xeeeeee,
             transparent: true,
-            opacity: 0.35,
+            opacity: 0.45,
             side: THREE.FrontSide,
             depthWrite: false,
         });
