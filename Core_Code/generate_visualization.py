@@ -627,7 +627,9 @@ def fetch_synapse_positions(body_ids, type_lookup, partner_type_lookup=None,
             try:
                 pdf, _ = fetch_neurons(NC(bodyId=batch))
                 for _, row in pdf.iterrows():
-                    typ = row.get('type') or 'unknown'
+                    typ = row.get('type')
+                    if not isinstance(typ, str) or not typ:
+                        typ = 'unknown'
                     bid_type_map[str(row['bodyId'])] = typ
             except Exception as e:
                 print(f"    Batch failed: {e}")
