@@ -2683,7 +2683,7 @@ class SceneManager {
         this.renderer = new THREE.WebGLRenderer({
             canvas: this.canvas,
             antialias: true,
-            alpha: false,
+            alpha: true,
             preserveDrawingBuffer: true
         });
         this.renderer.setPixelRatio(window.devicePixelRatio);
@@ -5905,7 +5905,12 @@ class UIManager {
         snapBtn.style.cssText = _iconBtnStyle;
         snapBtn.onclick = () => {
             const s = this.viewer.scene;
+            const prevClearColor = new THREE.Color();
+            s.renderer.getClearColor(prevClearColor);
+            const prevClearAlpha = s.renderer.getClearAlpha();
+            s.renderer.setClearColor(0x000000, 0);
             s.renderer.render(s.scene, s.camera);
+            s.renderer.setClearColor(prevClearColor, prevClearAlpha);
             s._captureScaleBar = true;
             s._renderScaleBar();
             s._captureScaleBar = false;
