@@ -260,12 +260,17 @@ def fetch_neuron_meshes(body_ids, max_faces=5000, max_threads=10):
     import multiprocessing
     from tqdm import tqdm
 
-    # Detect available cores safely (cpu_count can return None on some systems)
+    # Detect cores actually allocated to this job (sched_getaffinity respects
+    # SLURM/cgroup CPU limits; cpu_count() reports the whole node's physical
+    # cores and causes massive oversubscription on shared cluster nodes).
     try:
-        n_cpus = multiprocessing.cpu_count() or 1
-    except NotImplementedError:
-        n_cpus = 1
-    n_workers = min(n_cpus, len(mesh_neurons), 8)
+        n_cpus = len(os.sched_getaffinity(0))
+    except AttributeError:
+        try:
+            n_cpus = multiprocessing.cpu_count() or 1
+        except NotImplementedError:
+            n_cpus = 1
+    n_workers = min(n_cpus, len(mesh_neurons))
 
     # Prepare args for parallel processing
     mesh_args = [(str(m.id), m.vertices.astype(np.float64), m.faces.astype(np.int64), max_faces)
@@ -5975,6 +5980,13 @@ class UIManager {
         btn.onclick = () => {
             const mIdx = this.data.colorModes.findIndex(m => m.name === mode.name);
             if (mIdx < 0) return;
+            // Instance-level modes (Instance, uploaded per-bodyId colormaps, NT legend) only
+            // render distinct per-neuron colors in Neuron mode — switch to it automatically
+            // instead of leaving the mode stuck showing stale/collapsed colors.
+            const isInstanceLevelMode = mode.name === 'Instance' || mode.is_instance_level || mode.nt_legend;
+            if (isInstanceLevelMode && !this.hlModeByNeuron && this._switchMode) {
+                this._switchMode(true);
+            }
             // If Predicted NT auto-switched us to neuron mode, silently restore
             const wasNtAutoSwitched = this._ntAutoSwitchedNeuron && this.hlModeByNeuron;
             if (wasNtAutoSwitched && this._switchMode) {
@@ -8500,7 +8512,9 @@ class UIManager {
     }
 
     _updateInstanceBtnState() {
-        // Gray out Instance and instance-level color buttons when not in neuron mode
+        // Dim Instance and instance-level color buttons when not in neuron mode.
+        // Stay clickable (see _addColorModeButton) — clicking auto-switches to Neuron mode
+        // instead of being a dead button, so uploaded per-neuron colormaps stay recoverable.
         const isNeuronMode = this.hlModeByNeuron;
         for (const btn of (this._instanceLevelBtns || [])) {
             const modeName = btn.dataset.colormodename;
@@ -8508,10 +8522,8 @@ class UIManager {
             const isActive = this.vis.activeColorMode === mIdx;
             if (!isNeuronMode && !isActive) {
                 btn.style.opacity = '0.35';
-                btn.style.pointerEvents = 'none';
             } else {
                 btn.style.opacity = '1';
-                btn.style.pointerEvents = 'auto';
             }
         }
     }
@@ -11117,6 +11129,10 @@ class UIManager {
         customListScroll.style.cssText = 'max-height:200px;overflow-y:auto;border:1px solid #444;border-radius:3px;'
             + 'background:#1a1a1a;padding:2px;';
         customListWrap.appendChild(customListScroll);
+        const customListHint = document.createElement('div');
+        customListHint.textContent = 'Click to select · Ctrl/Cmd- or Shift-click for multiple · drag any selected row to move them together';
+        customListHint.style.cssText = 'font-size:10px;color:#777;margin-top:3px;';
+        customListWrap.appendChild(customListHint);
         tilingOptionsDiv.appendChild(customListWrap);
 
         // State for custom ordering
@@ -11155,7 +11171,32 @@ class UIManager {
             }
             customOrder = items.slice();
 
-            let dragSrc = null;
+            // Multi-select state — click (optionally with Ctrl/Cmd/Shift) selects rows;
+            // dragging any selected row moves the whole selected block together.
+            let selectedRows = new Set();
+            let anchorRow = null;
+            let dragRows = [];
+
+            const _styleRow = (row) => {
+                if (selectedRows.has(row)) {
+                    row.style.background = 'rgba(212,160,23,0.22)';
+                    row.style.borderColor = 'rgba(212,160,23,0.6)';
+                } else {
+                    row.style.background = '#222';
+                    row.style.borderColor = 'transparent';
+                }
+            };
+            const _clearSelection = () => {
+                for (const r of selectedRows) { selectedRows.delete(r); _styleRow(r); }
+            };
+            const _selectRange = (fromRow, toRow) => {
+                const rows = Array.from(customListScroll.children);
+                const i1 = rows.indexOf(fromRow), i2 = rows.indexOf(toRow);
+                if (i1 < 0 || i2 < 0) return;
+                const [lo, hi] = i1 < i2 ? [i1, i2] : [i2, i1];
+                for (let k = lo; k <= hi; k++) { selectedRows.add(rows[k]); _styleRow(rows[k]); }
+            };
+
             for (let i = 0; i < items.length; i++) {
                 const row = document.createElement('div');
                 row.draggable = true;
@@ -11185,14 +11226,36 @@ class UIManager {
                 label.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
                 row.appendChild(label);
 
+                row.addEventListener('click', (e) => {
+                    if (e.shiftKey && anchorRow) {
+                        _selectRange(anchorRow, row);
+                    } else if (e.ctrlKey || e.metaKey) {
+                        if (selectedRows.has(row)) selectedRows.delete(row); else selectedRows.add(row);
+                        _styleRow(row);
+                        anchorRow = row;
+                    } else {
+                        _clearSelection();
+                        selectedRows.add(row);
+                        _styleRow(row);
+                        anchorRow = row;
+                    }
+                });
                 row.addEventListener('dragstart', (e) => {
-                    dragSrc = row;
-                    row.style.opacity = '0.4';
+                    // Dragging a row that isn't part of the current selection selects just it
+                    if (!selectedRows.has(row)) {
+                        _clearSelection();
+                        selectedRows.add(row);
+                        _styleRow(row);
+                        anchorRow = row;
+                    }
+                    // Preserve top-to-bottom order of the dragged block
+                    dragRows = Array.from(customListScroll.children).filter(r => selectedRows.has(r));
+                    for (const r of dragRows) r.style.opacity = '0.4';
                     e.dataTransfer.effectAllowed = 'move';
                 });
                 row.addEventListener('dragend', () => {
-                    row.style.opacity = '1';
-                    dragSrc = null;
+                    for (const r of dragRows) r.style.opacity = '1';
+                    dragRows = [];
                     for (const c of customListScroll.children) {
                         c.style.borderTop = '1px solid transparent';
                         c.style.borderBottom = '1px solid transparent';
@@ -11201,6 +11264,7 @@ class UIManager {
                 row.addEventListener('dragover', (e) => {
                     e.preventDefault();
                     e.dataTransfer.dropEffect = 'move';
+                    if (dragRows.includes(row)) return;
                     const rect = row.getBoundingClientRect();
                     const midY = rect.top + rect.height / 2;
                     for (const c of customListScroll.children) {
@@ -11215,19 +11279,21 @@ class UIManager {
                 });
                 row.addEventListener('drop', (e) => {
                     e.preventDefault();
-                    if (!dragSrc || dragSrc === row) return;
+                    if (dragRows.length === 0 || dragRows.includes(row)) return;
                     const rect = row.getBoundingClientRect();
                     const midY = rect.top + rect.height / 2;
-                    if (e.clientY < midY) {
-                        customListScroll.insertBefore(dragSrc, row);
-                    } else {
-                        customListScroll.insertBefore(dragSrc, row.nextSibling);
-                    }
+                    // Capture a fixed reference node so inserting multiple rows preserves their order
+                    const ref = e.clientY < midY ? row : row.nextSibling;
+                    for (const r of dragRows) customListScroll.insertBefore(r, ref);
                     // Rebuild customOrder from DOM order
                     customOrder = [];
                     for (const c of customListScroll.children) {
                         const idx = parseInt(c.dataset.idx, 10);
                         customOrder.push(items[idx]);
+                    }
+                    for (const c of customListScroll.children) {
+                        c.style.borderTop = '1px solid transparent';
+                        c.style.borderBottom = '1px solid transparent';
                     }
                 });
 
